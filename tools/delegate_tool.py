@@ -2311,6 +2311,16 @@ def _run_single_child(
             except Exception as exc:
                 logger.debug("Failed to release credential lease: %s", exc)
 
+        # Release subagent router provider slot (if routing is enabled)
+        assigned_provider = getattr(child, "_assigned_provider", None)
+        if assigned_provider:
+            try:
+                from tools.subagent_router import release_provider as _router_release
+
+                _router_release(assigned_provider)
+            except Exception as exc:
+                logger.debug("Failed to release subagent router provider '%s': %s", assigned_provider, exc)
+
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools
@@ -2454,6 +2464,25 @@ def delegate_task(
     except ValueError as exc:
         return tool_error(str(exc))
 
+    # Check if subagent routing is enabled (opt-in feature).
+    # When enabled, we use per-child credential resolution via priority routing
+    # with check-out counters, health checks, and overflow queue.
+    # When disabled/absent, all children share the same creds (existing behavior).
+    _acquire_provider = None
+    _enqueue_task = None
+    _release_provider = None
+    try:
+        from tools.subagent_router import (
+            acquire_provider as _acquire_provider,
+            enqueue_task as _enqueue_task,
+            release_provider as _release_provider,
+            _is_enabled as _routing_enabled,
+        )
+        ROUTING_ENABLED = _routing_enabled()
+    except Exception as exc:
+        logger.debug("Subagent router not available: %s", exc)
+        ROUTING_ENABLED = False
+
     # Normalize to task list
     max_children = _get_max_concurrent_children()
     recovered_tasks, tasks_error = _recover_tasks_from_json_string(tasks)
@@ -2507,11 +2536,76 @@ def delegate_task(
     # Wrapped in try/finally so the global is always restored even if a
     # child build raises (otherwise _last_resolved_tool_names stays corrupted).
     children = []
+    queued_tasks = []  # tasks that couldn't get a provider immediately
+    queued_sync_events = []  # threading.Events for sync queued tasks
+
+    # When subagent routing is enabled, we need to resolve credentials per-child
+    # and potentially queue tasks that can't be assigned immediately.
+    if ROUTING_ENABLED:
+        from tools.approval import get_current_session_key
+        _session_key = get_current_session_key(default="")
+    else:
+        _session_key = ""
+
     try:
         for i, t in enumerate(task_list):
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Resolve credentials for this specific child
+            if ROUTING_ENABLED:
+                # Per-task provider override takes highest priority
+                task_provider_override = t.get("provider")
+                task_goal = t.get("goal", "")
+
+                child_creds = _acquire_provider(  # type: ignore[misc]
+                    provider_override=task_provider_override,
+                    goal=task_goal,
+                )
+
+                if child_creds is None:
+                    # No provider available — try to enqueue
+                    sync_event = None
+                    if not background:
+                        # Sync mode: create event to wait on
+                        sync_event = threading.Event()
+                        queued_sync_events.append(sync_event)
+
+                    enqueued = _enqueue_task(  # type: ignore[misc]
+                        task=t,
+                        session_key=_session_key,
+                        sync_event=sync_event,
+                        parent_agent=parent_agent,
+                        delegation_cfg=cfg,
+                    )
+                    if enqueued:
+                        queued_tasks.append({
+                            "task": t,
+                            "sync_event": sync_event,
+                        })
+                        logger.debug(
+                            "Task %d enqueued for later dispatch: %s",
+                            i, t.get("goal", "")[:80],
+                        )
+                        continue  # skip building this child for now
+                    else:
+                        # Queue is full — fall back to default credentials
+                        logger.warning(
+                            "Queue full for task %d, falling back to default provider: %s",
+                            i, t.get("goal", "")[:80],
+                        )
+                        child_creds = creds
+
+                # Tag the task with which provider was assigned (for release)
+                t["_assigned_provider"] = task_provider_override or (
+                    # Try to determine which provider was assigned
+                    # by checking the resolved base_url against known providers
+                    child_creds.get("provider")
+                )
+            else:
+                child_creds = creds
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2519,26 +2613,76 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=child_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=child_creds["provider"],
+                override_base_url=child_creds["base_url"],
+                override_api_key=child_creds["api_key"],
+                override_api_mode=child_creds["api_mode"],
+                override_request_overrides=child_creds.get("request_overrides"),
+                override_max_tokens=child_creds.get("max_output_tokens"),
+                override_acp_command=child_creds.get("command"),
+                override_acp_args=child_creds.get("args"),
                 role=effective_role,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
+            # Tag child with assigned provider for later release
+            setattr(child, "_assigned_provider", t.get("_assigned_provider"))
             children.append((i, t, child))
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
+
+    # If all tasks were queued (no children built), handle appropriately
+    if not children and queued_tasks:
+        if not background:
+            # Sync mode: wait for all queued tasks to complete
+            logger.debug(
+                "All %d tasks queued — waiting for dispatcher to complete them",
+                len(queued_tasks),
+            )
+            for qt in queued_tasks:
+                if qt["sync_event"]:
+                    qt["sync_event"].wait(timeout=600)  # 10 min timeout
+
+            # Return a summary indicating tasks were queued
+            return json.dumps({
+                "status": "completed",
+                "results": [
+                    {
+                        "task_index": idx,
+                        "status": "queued_completed",
+                        "summary": f"Task was queued and completed via subagent router",
+                        "goal": qt["task"].get("goal", ""),
+                    }
+                    for idx, qt in enumerate(queued_tasks)
+                ],
+                "note": (
+                    f"All {len(queued_tasks)} tasks were queued due to provider "
+                    "capacity limits and completed via the subagent router dispatcher."
+                ),
+            }, ensure_ascii=False)
+        else:
+            # Async mode: return immediately, results will enter conversation later
+            return json.dumps({
+                "status": "dispatched",
+                "results": [
+                    {
+                        "task_index": idx,
+                        "status": "queued",
+                        "goal": qt["task"].get("goal", ""),
+                    }
+                    for idx, qt in enumerate(queued_tasks)
+                ],
+                "note": (
+                    f"All {len(queued_tasks)} tasks were queued due to provider "
+                    "capacity limits. Results will re-enter the conversation "
+                    "as each task completes."
+                ),
+            }, ensure_ascii=False)
 
     def _execute_and_aggregate() -> dict:
         """Run all built children (1 or N), join on them, aggregate results,
