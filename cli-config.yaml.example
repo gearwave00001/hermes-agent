@@ -1125,6 +1125,88 @@ delegation:
   #                                           # Supported: openrouter, nous, zai, kimi-coding, minimax
 
 # =============================================================================
+# Subagent Routing (Opt-in — for local GPU server topologies)
+# =============================================================================
+# When enabled, subagents are distributed across multiple local GPU servers
+# using priority-based routing with check-out counters, health checks, and
+# an overflow queue. This is designed for users with multiple local inference
+# servers (llama.cpp, vLLM) who need fine-grained control over resource usage.
+#
+# When absent or enabled: false, all subagents use the single delegation.provider
+# configured above (existing behavior).
+#
+# Example configuration for a 5-server LAN topology:
+#
+# subagent_routing:
+#   enabled: true
+#
+#   # Health check timeout in seconds before assigning a provider (default: 3)
+#   health_check_timeout: 3
+#
+#   # Overflow queue configuration
+#   queue:
+#     enabled: true                           # Enable overflow queue (default: true)
+#     max_size: 20                            # Max pending tasks in queue (default: 20)
+#     poll_interval: 2                        # Seconds between queue dispatch checks (default: 2)
+#
+#   # Rule-based routing: match goal substrings to specific providers
+#   # Evaluated AFTER per-task provider override, BEFORE priority_order
+#   goal_rules:
+#     - match: "code review"                  # Substring match (case-insensitive)
+#       provider: "192.168.1.224"            # Always send to this server
+#     - match: "^research.*"                  # Regex match (anchored with ^/$)
+#       provider: "192.168.1.221"
+#
+#   # Priority order: servers are tried top-to-bottom for each subagent
+#   # Each entry MUST have max_concurrent (no default).
+#   # active_count is managed by the router at runtime — do not set manually.
+#   priority_order:
+#     - name: 192.168.1.224                  # Provider name from custom_providers
+#       purpose: heavy workloads, long context
+#       enabled: true                         # Available for routing
+#       max_concurrent: 2                     # REQUIRED: max simultaneous subagents
+#       active_count: 0                       # Runtime state (managed automatically)
+#     - name: 192.168.1.221
+#       purpose: fallback
+#       enabled: true
+#       max_concurrent: 1
+#       active_count: 0
+#     - name: 192.168.1.222
+#       purpose: ComfyUI idle
+#       enabled: false                        # Disabled by default
+#       max_concurrent: 1
+#       active_count: 0
+#
+#   # Exclude the main conversation server from subagent routing
+#   main_server: Server_llamacpp
+#   exclude_main_from_subagents: true
+#
+# Per-task provider override (in delegate_task call):
+#   tasks:
+#     - goal: "test model X on RTX 5090"
+#       provider: "192.168.1.222"   # Force this specific server
+#     - goal: "quick code review"
+#       # No provider — uses normal routing
+#
+# How it works:
+#   1. Each subagent task tries to acquire a provider via priority routing
+#   2. The router checks: enabled? at capacity? health check passes?
+#   3. If acquired, the subagent runs on that provider
+#   4. If no provider is available, the task is queued
+#   5. When a subagent finishes, its provider slot is released
+#   6. The dispatcher thread dispatches queued tasks to freed slots
+#   7. For synchronous delegations, the parent blocks until all queued tasks complete
+#
+# Relationship to existing delegation settings:
+#   - max_concurrent_children: total subagents per batch (parent-level limit)
+#   - max_async_children: background subagent limit (parent-level limit)
+#   - max_spawn_depth: delegation tree depth (nesting limit)
+#   - priority_order[].max_concurrent: per-provider concurrency (provider-level limit)
+#   The effective limit for any provider is min(max_concurrent_children, provider.max_concurrent).
+subagent_routing:
+  # enabled: false                            # Set to true to activate priority routing
+
+# =============================================================================
 # Honcho Integration (Cross-Session User Modeling)
 # =============================================================================
 # AI-native persistent memory via Honcho (https://honcho.dev/).
