@@ -42,6 +42,41 @@ Good verification targets:
 - User documentation: https://hermes-agent.nousresearch.com/docs/
 - Source tree: https://github.com/NousResearch/hermes-agent
 
+## Web Search & Fetch — open-websearch MCP server
+
+**NEVER use the built-in `web_search` or `web_extract` tools.** They are misconfigured and will fail or return wrong results.
+
+**There is exactly ONE script for both searching and fetching: `mcp_search`**
+
+```bash
+# Search the web
+mcp_search "query" [limit]
+
+# Fetch full page content from a URL (note: --fetch is a FLAG, not a separate command)
+mcp_search --fetch "https://example.com"
+```
+
+The script is at `~/.local/bin/mcp_search` and connects to an open-websearch MCP server at `http://192.168.1.225:3100/mcp`.
+
+**CRITICAL: There is NO `mcp_fetch` command. There is NO `mcp_get` command. There is ONLY `mcp_search`.**
+
+**When the user asks to search the web, fetch a URL, or look up current information:**
+1. Use `terminal(command='mcp_search \"query\"')` — NOT `web_search("query")`
+2. Use `terminal(command='mcp_search --fetch \"url\"')` — NOT `web_extract(["url"])`, NOT `mcp_fetch "url"`
+3. Do not ask the user for permission to use web_search or web_extract. Just use mcp_search.
+
+The MCP server also exposes these tools via Hermes' native MCP client (auto-discovered on startup):
+- `mcp_open_websearch_search` — web search (DuckDuckGo, Bing) with query/limit/searchMode/engines params
+- `mcp_open_websearch_fetch_web_content` — fetch any public URL with maxChars/readability/includeLinks options
+- `mcp_open_websearch_fetch_github_readme` — fetch README from a GitHub repo URL
+- `mcp_open_websearch_fetch_linux_do_article` — fetch linux.do post content
+- `mcp_open_websearch_fetch_csdn_article` — fetch csdn post content
+- `mcp_open_websearch_fetch_juejin_article` — fetch juejin post content
+
+Use the CLI wrapper (`mcp_search`) for simplicity; use the MCP tools when you need structured JSON output or want to chain tool calls.
+
+**Docs:** https://hermes-agent.nousresearch.com/docs/
+
 ## Quick Start
 
 ```bash
@@ -720,6 +755,121 @@ Spawn a subagent with an isolated context + terminal session.
   `terminal(background=True, notify_on_complete=True)`.
 
 Config: `delegation.*` in `config.yaml`.
+
+#### GPU Server Routing for Subagents
+
+When running behind a single-request-per-connection llama.cpp server (or any
+inference backend), subagents route to **separate HTTP connections** on other
+servers — they do NOT share the parent's inference slot.
+
+**Key pattern:** Configure all servers under `custom_providers` in
+`config.yaml`. The main conversation uses `model.base_url` (the primary);
+subagents pick from `custom_providers` based on the `model` field passed to
+`delegate_task`.
+
+**CRITICAL PITFALL — empty delegation.provider:** When `delegation.provider`
+is empty (`''`) in config.yaml, subagents **inherit from parent** instead of
+routing to the configured server. Even if the server is defined in
+`custom_providers` and first in `subagent_routing.priority_order`, an empty
+`delegation.provider` means the subagent stays on the parent's server (225).
+
+**Fix:** Set both fields explicitly:
+```bash
+hermes config set delegation.provider "192.168.1.224"
+hermes config set delegation.model "Qwen3.6-27B-FP8"
+```
+
+**Important distinction:** `delegation.provider` is the DEFAULT, not the
+destination. When `subagent_routing.enabled: false`, `delegate_task` reads
+`delegation.provider` directly — all subagents go to one server. When
+`subagent_routing.enabled: true`, each child calls `acquire_provider()`
+independently, walking `priority_order` top-to-bottom — so different subagents
+can be distributed across different servers even though `delegation.provider`
+points to a single value. Always set `delegation.provider` explicitly when you
+want subagents to route away from parent in the legacy single-provider mode.
+
+**Fallback chain:** Subagents inherit the parent's `_fallback_chain` at runtime
+(see `delegate_tool.py` line 1187). The top-level `fallback_providers: []` in
+config.yaml feeds this chain — when empty, the fallback is thin (just the parent's
+own provider). To get multi-server failover, populate either the top-level list or
+add `delegation.fallback_providers`.
+
+```yaml
+# config.yaml — custom_providers section
+custom_providers:
+- name: 192.168.1.225        # Primary — always on, power efficient
+  base_url: http://192.168.1.225:5678/v1/
+  api_key: proxy-managed
+  model: Huihui-Qwen3.6-35B-A3B-abliterated-ggml-model-Q6_K.gguf
+  # RTX 5060 Ti 16GB — slow but very power efficient, always-on
+
+- name: 192.168.1.224          # Most powerful — highest VRAM & context window
+  base_url: http://192.168.1.224:5678/v1
+  api_key: proxy-managed
+  model: Qwen3.6-27B-FP8
+  # 2x Radeon R9700 PRO AI 32GB = 64GB VRAM, highest context window
+
+- name: 192.168.1.222          # High capacity — largest single GPU
+  base_url: http://192.168.1.222:5678/v1
+  api_key: proxy-managed
+  model: Huihui-Qwen3.6-35B-A3B-abliterated-ggml-model-Q6_K.gguf
+  # RTX 5090 32GB — best single-GPU performance
+
+# To disable a server: comment out its entry (add # at start of each line)
+# To set a default for all subagents: set delegation.provider to the server name
+```
+
+**Port conventions:** The port is typically `5678` but can be overridden. The `base_url` must include the
+port even if it's the standard one.d
+
+**Primary reservation:** The primary server (`subagent_routing.main_server` by default)
+handles the main conversation and should generally be skipped for subagents
+unless explicitly routed to. This prevents contention with the parent agent.
+
+See `references/gpu-server-routing.md` for detailed routing patterns, the `subagent_routing` block, and the `fallback_providers` feature request. See `references/multi-server-delegation.md` for research notes on multi-server delegation configuration.
+
+**vLLM timeout recovery:** When a subagent's vLLM server times out mid-generation, it stays alive but loses context. Send an HTTP POST to `/v1/chat/completions` with a system message restating the topic (not raw text via socket). See `references/vllm-timeout-recovery.md`.
+
+**Batch result ordering:** In batch mode, subagent results re-enter as separate assistant messages in the session DB. Use `session_search` with `role_filter="assistant"` and anchor on message position rather than text-matching — subagent results append at the end of the stream. Scroll forward from the last known message if a result hasn't appeared yet.
+
+**Locating responses by delegation_id:** When dispatching subagents, always record the returned `delegation_id` values (from the `delegate_task` tool call output) and verify them against completion banners before attributing reports. This prevents mixing up carryover completions from earlier dispatch cycles with fresh results.
+
+**CRITICAL PITFALL — repeated mistake: **topic-matching trap.** When running `session_search` to find a completed subagent report, the most common error is grabbing the most recent-looking report that matches the topic, even if its `delegation_id` belongs to an older carryover delegate. This has happened multiple times: dispatching `deleg_838c7793` for EV research but using `deleg_cf178d38` (a different session's completed report on the same topic). The fix is strict ID verification, not "good enough" topic matching.
+
+Procedure:
+1. **Capture IDs at dispatch.** When calling `delegate_task`, read the `delegation_id` (or each task's ID in batch mode) from the tool call output and store them — e.g., `oil: deleg_028a5988`, `ev: deleg_838c7793`. Write them down explicitly. Do not rely on topic matching alone.
+2. **Verify on completion.** When an `ASYNC DELEGATION BATCH COMPLETE` banner arrives, check the `delegation_id` in the banner against your recorded list. A mismatch means the report may belong to an older carryover delegate that was still running or got a manual `continue` signal.
+3. **Cross-reference session_search — anchor on ID, not topic.** Use `session_search(query="...", sort="newest")` and look for the `delegation_id` in the banner text of completed messages. Do NOT grab the first report that "looks right" by topic — scan through results until you find one whose banner contains the exact `delegation_id` you dispatched. Anchor on message position (scroll forward from last known) rather than text-matching topics, since older reports may sit in history with the same topic.
+4. **Distinguish carryover vs fresh.** A carryover completion has a different `delegation_id` than what you dispatched this turn. It will have its own banner with the older ID. Do not assume the latest-looking report corresponds to your most recent dispatch — check the ID explicitly.
+5. **When in doubt, re-dispatch.** If a delegate is stuck (e.g., vLLM timeout) and has been receiving manual signals, it may complete with a stale `delegation_id` that confuses attribution. Dispatch a fresh one if you need guaranteed clean attribution.
+6. **Wait for the right ID before synthesizing.** When dispatching multiple subagents, do not synthesize the final report until you have confirmed both (or all) completion banners contain the exact `delegation_id` values you recorded at dispatch. If one is still running past its expected duration, wait or re-dispatch rather than substituting a carryover.
+
+### Waiting Protocol — Don't Give Up Too Early
+
+When dispatching multiple subagents in parallel, **do not synthesize until all expected delegates have completed**. The most common error pattern: one delegate finishes quickly, the other is still running (longer than expected), and you substitute a carryover report from an older session instead of waiting.
+
+**Explicit waiting steps:**
+
+1. **Record expected count.** After dispatching N subagents, note `expected = N`. Each time a completion banner arrives, decrement. Synthesize when `remaining == 0` AND all IDs match.
+
+2. **Use the 3x timeout rule.** If a delegate is still running after **3x its peer's duration**, it may be slow but not stuck. Example: oil finishes in 156s; EV is still running at 468s (3x). At this point, check whether it's genuinely slow (normal) or stuck (vLLM timeout, network issue). Do NOT substitute a carryover before this threshold unless you detect an explicit error.
+
+3. **Check for the banner before substituting.** Before grabbing a `session_search` result as a substitute, verify: does its banner contain the exact `delegation_id` I recorded? If yes → use it. If no (it's a different ID) → do NOT use it as a substitute; keep waiting for the real one.
+
+4. **If you must synthesize early due to context pressure**, explicitly note which delegate(s) are still running and defer their integration. Example: "Synthesizing with oil report complete; EV report (deleg_838c7793) is still arriving — will incorporate when it lands." This prevents silent substitution errors.
+
+5. **After synthesizing, check for late arrivals.** If a delegate completes after your synthesis, review whether its data should be folded in. If the late result adds new information (not just redundant), add a follow-up note.
+
+**Decision tree when one delegate is still running:**
+```
+Is completion banner received with matching delegation_id?
+  YES → Use it, continue to synthesis
+  NO  → Is it past 3x peer duration?
+          YES → Check if stuck (vLLM timeout, etc.)
+                 Stuck → Re-dispatch or substitute carryover (note it)
+                 Not stuck → Wait up to 60s more
+          NO  → Continue waiting (it's just slow)
+```
 
 ### Cron (scheduled jobs)
 
