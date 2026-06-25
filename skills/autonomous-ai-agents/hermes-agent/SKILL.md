@@ -769,9 +769,9 @@ subagents pick from `custom_providers` based on the `model` field passed to
 
 **CRITICAL PITFALL — empty delegation.provider:** When `delegation.provider`
 is empty (`''`) in config.yaml, subagents **inherit from parent** instead of
-routing to the configured server. Even if the server is defined in
-`custom_providers` and first in `subagent_routing.priority_order`, an empty
-`delegation.provider` means the subagent stays on the parent's server (225).
+routing to the configured server. Even if the server is defined in 
+`subagent_routing.priority_order`, an empty `delegation.provider` means the subagent 
+stays on the parent's server (225).
 
 **Fix:** Set both fields explicitly:
 ```bash
@@ -787,6 +787,20 @@ independently, walking `priority_order` top-to-bottom — so different subagents
 can be distributed across different servers even though `delegation.provider`
 points to a single value. Always set `delegation.provider` explicitly when you
 want subagents to route away from parent in the legacy single-provider mode.
+
+**CRITICAL PITFALL — max_concurrent_children cap blocks batch dispatch:** When dispatching multiple subagents via `delegate_task(tasks=[...])`, the parent's own `max_concurrent_children` limit (default: 3) is checked BEFORE tasks reach the queue layer. If you pass more tasks than this cap, excess tasks are rejected with "Too many tasks" — they never even enter the overflow queue.
+
+**Why it happens:** The config file may show `max_concurrent_children: 10`, but`_get_max_concurrent_children()` reads from `CLI_CONFIG.get("delegation")`. If that returns an empty dict (e.g., stale config or wrong path), the function falls back to the hardcoded default of **3**.
+
+**Fix:** Always verify `max_concurrent_children` is read correctly before batch dispatching. Set it explicitly if needed:
+```bash
+hermes config set delegation.max_concurrent_children 10
+```
+
+When dispatching N subagents in batch mode, ensure `N <= max_concurrent_children`.If you need more concurrent tasks, either:
+1. Increase `delegation.max_concurrent_children` (recommended for LAN servers)
+2. Split into multiple `delegate_task()` calls (sends 2-3 at a time)
+3. Pass tasks as individual `delegate_task(goal=..., context=...)` calls
 
 **Fallback chain:** Subagents inherit the parent's `_fallback_chain` at runtime
 (see `delegate_tool.py` line 1187). The top-level `fallback_providers: []` in
