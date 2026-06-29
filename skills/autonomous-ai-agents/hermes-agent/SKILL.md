@@ -840,7 +840,7 @@ port even if it's the standard one.d
 handles the main conversation and should generally be skipped for subagents
 unless explicitly routed to. This prevents contention with the parent agent.
 
-See `references/gpu-server-routing.md` for detailed routing patterns, the `subagent_routing` block, and the `fallback_providers` feature request. See `references/multi-server-delegation.md` for research notes on multi-server delegation configuration.
+See `references/gpu-server-routing.md` for detailed routing patterns, the `subagent_routing` block, and the `fallback_providers` feature request. See `references/gpu-server-routing-edge-cases.md` for edge cases: queue-full vs at-capacity distinction, goal-rule fallback behavior, release-triggered dispatch timing, and provider resolution cascade. See `references/multi-server-delegation.md` for research notes on multi-server delegation configuration.
 
 **vLLM timeout recovery:** When a subagent's vLLM server times out mid-generation, it stays alive but loses context. Send an HTTP POST to `/v1/chat/completions` with a system message restating the topic (not raw text via socket). See `references/vllm-timeout-recovery.md`.
 
@@ -884,6 +884,54 @@ Is completion banner received with matching delegation_id?
                  Not stuck → Wait up to 60s more
           NO  → Continue waiting (it's just slow)
 ```
+
+#### Parallel Research Pattern
+
+When the user asks for broad research on a topic, dispatch multiple subagents
+with **distinct angles** (chronological periods, themes, or dimensions) in
+parallel. Each subagent writes to its own workspace file; you then review and
+consolidate into a single summary document.
+
+**Procedure:**
+
+1. **Plan the angles.** Identify N distinct research dimensions. Common patterns:
+   - Chronological (e.g., early era, mid-century, modern)
+   - Thematic (e.g., legal framework, cultural attitudes, technological disruption)
+   - Geographic (e.g., US, UK, continental Europe)
+   - By subject area (e.g., film, print, digital media)
+
+2. **Dispatch in batch.** Use `delegate_task(tasks=[...])` with each task having:
+   - A clear `goal` specifying the angle and time scope
+   - A specific output file path (use a consistent naming convention, e.g., `workspace/topic_era.md`)
+   - Appropriate `toolsets` (usually `web, file, terminal` for research)
+   - Enough context so each subagent is self-contained
+
+3. **Verify max_concurrent_children.** Before dispatching, check that N ≤ the configured cap (default 3; set explicitly via `hermes config set delegation.max_concurrent_children N`). This session confirmed 4–10 slots are reliable for LAN server setups.
+
+4. **Wait for all banners.** Don't synthesize until all expected completion banners arrive with matching `delegation_id` values. Use the Waiting Protocol above — do not substitute carryover reports based on topic alone.
+
+5. **Review each file.** Read each workspace file to verify quality and check for overlap or gaps between angles.
+
+6. **Create a consolidated summary.** Write a single summary document that:
+   - Opens with an executive overview connecting all angles
+   - Summarizes each period/angle in its own section (referencing the source files)
+   - Includes cross-era synthesis identifying recurring themes, patterns, and causal connections
+   - Provides a master timeline or key dates table
+   - Lists individual report file paths as references
+
+7. **Note any issues.** Record which subagents encountered problems (search failures, dead pages, etc.) — this helps future sessions calibrate expectations for similar research tasks.
+
+**Example dispatch pattern:**
+```python
+delegate_task(tasks=[
+    {"goal": "Research X from angle A. Cover Y and Z. Write to workspace/x_angle_a.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
+    {"goal": "Research X from angle B. Cover Y and Z. Write to workspace/x_angle_b.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
+    {"goal": "Research X from angle C. Cover Y and Z. Write to workspace/x_angle_c.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
+])
+# Then: read all files → write workspace/x_summary.md
+```
+
+**When NOT to use this pattern:** For narrow, focused questions where a single subagent suffices. Use parallel research when the topic has natural dimensions that benefit from independent deep-dives.
 
 ### Cron (scheduled jobs)
 
