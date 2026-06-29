@@ -1194,6 +1194,14 @@ DEFAULT_CONFIG = {
         # matches a key in this dict.
         # Edit directly in config.yaml (no CLI support due to dots in keys).
         "reasoning_overrides": {},
+
+        # Delay (ms) before MCP tool calls matching mcp_delay_tool_patterns.
+        # Prevents thundering-herd timeouts when multiple subagents fire
+        # concurrent web search requests against DuckDuckGo.  0 = disabled.
+        "tool_call_delay_ms": 0,
+        # Glob patterns for MCP tool names that receive the pre-call delay.
+        # Default targets web search and content fetch tools.
+        "mcp_delay_tool_patterns": ["*search*", "*fetch*"],
     },
 
     "terminal": {
