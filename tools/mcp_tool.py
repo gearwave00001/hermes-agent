@@ -92,6 +92,7 @@ Thread safety:
 import asyncio
 import contextvars
 import concurrent.futures
+import fnmatch
 import inspect
 import json
 import logging
@@ -118,6 +119,72 @@ logger = logging.getLogger(__name__)
 # first in the normal case; this outer bound only bites when a stalled SSL
 # handshake defeats the inner timeout (the #29184 failure mode).
 _OSV_MALWARE_CHECK_TIMEOUT_S = 12.0
+
+
+# ---------------------------------------------------------------------------
+# MCP tool call delay — rate limiting for concurrent web search requests
+# ---------------------------------------------------------------------------
+#
+# When multiple subagents fire web search requests simultaneously through
+# the open-websearch MCP server, DuckDuckGo drops or rate-limits the
+# concurrent requests.  This module provides a configurable pre-call delay
+# that only applies to tools matching specific name patterns (default:
+# *search*, *fetch*), preventing thundering-herd failures.
+#
+# Config keys (under 'agent' in config.yaml):
+#   tool_call_delay_ms       — delay in milliseconds (0 = disabled)
+#   mcp_delay_tool_patterns  — list of fnmatch glob patterns (default:
+#                              ["*search*", "*fetch*"])
+#
+# The config is cached with a short TTL to avoid re-parsing YAML on every
+# tool call, while still picking up runtime config changes within seconds.
+
+_mcp_delay_cache: tuple[float, float, int, list[str]] = (0.0, 0.0, 0, [])
+_MCP_DELAY_CACHE_TTL = 5.0  # seconds
+
+
+def _get_mcp_delay_config() -> tuple[int, list[str]]:
+    """Return (delay_ms, patterns) from config, with caching.
+
+    Reads agent.tool_call_delay_ms and agent.mcp_delay_tool_patterns from
+    the Hermes config. Cached for _MCP_DELAY_CACHE_TTL seconds so we don't
+    re-parse YAML on every tool call.
+    """
+    global _mcp_delay_cache
+    now = time.monotonic()
+    cached_at, ttl, cached_delay, cached_patterns = _mcp_delay_cache
+    if now - cached_at < ttl:
+        return cached_delay, cached_patterns
+
+    delay_ms = 0
+    patterns = ["*search*", "*fetch*"]
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        agent_cfg = config.get("agent", {})
+        if isinstance(agent_cfg, dict):
+            raw_delay = agent_cfg.get("tool_call_delay_ms", 0)
+            delay_ms = int(raw_delay) if raw_delay else 0
+            raw_patterns = agent_cfg.get("mcp_delay_tool_patterns", [])
+            if raw_patterns:
+                patterns = [str(p) for p in raw_patterns]
+    except Exception as exc:
+        logger.debug("Failed to read MCP delay config: %s", exc)
+
+    _mcp_delay_cache = (now, ttl, delay_ms, patterns)
+    return delay_ms, patterns
+
+
+def _should_delay_tool(tool_name: str) -> bool:
+    """Check if a tool name matches any delay pattern.
+
+    Matches against both the full qualified name (server/tool) and the
+    bare tool name.
+    """
+    _, patterns = _get_mcp_delay_config()
+    return any(
+        fnmatch.fnmatch(tool_name, p) for p in patterns
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3864,6 +3931,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """
 
     def _handler(args: dict, **kwargs) -> str:
+        # Configurable pre-call delay for rate-sensitive tools (e.g. web
+        # search).  Scoped to tool names matching configured fnmatch patterns
+        # (default: *search*, *fetch*).  When multiple subagents fire
+        # concurrent search requests, this stagger prevents thundering-herd
+        # timeouts against DuckDuckGo.
+        _delay_ms, _patterns = _get_mcp_delay_config()
+        if _delay_ms > 0:
+            _qualified = f"{server_name}/{tool_name}"
+            if any(
+                fnmatch.fnmatch(_qualified, p) or fnmatch.fnmatch(tool_name, p)
+                for p in _patterns
+            ):
+                time.sleep(_delay_ms / 1000.0)
+
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).
