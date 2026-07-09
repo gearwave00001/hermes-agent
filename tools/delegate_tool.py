@@ -2132,6 +2132,9 @@ def _run_single_child(
         _output_tokens = getattr(child, "session_completion_tokens", 0)
         _model = getattr(child, "model", None)
 
+        # Capture assigned provider from child agent (set during build at line 2604)
+        _child_provider = getattr(child, "_assigned_provider", None) or "custom"
+
         entry: Dict[str, Any] = {
             "task_index": task_index,
             "status": status,
@@ -2139,6 +2142,7 @@ def _run_single_child(
             "api_calls": api_calls,
             "duration_seconds": duration,
             "model": _model if isinstance(_model, str) else None,
+            "provider": _child_provider,
             "exit_reason": exit_reason,
             "tokens": {
                 "input": (
@@ -3038,6 +3042,12 @@ def delegate_task(
 
         if dispatch.get("status") == "dispatched":
             n = len(_goals)
+            # Collect provider assignments for each task (set during child build)
+            providers: list[str] = []
+            for i_child in range(len(children)):
+                _idx, _task, _child = children[i_child]
+                prov = getattr(_child, "_assigned_provider", None) or str(creds.get("provider", ""))
+                providers.append(prov)
             note = (
                 "Subagent is running in the background. You and the user can "
                 "keep working; its full result re-enters the conversation as a "
@@ -3056,6 +3066,7 @@ def delegate_task(
                 "count": n,
                 "delegation_id": dispatch["delegation_id"],
                 "goals": _goals,
+                "providers": providers,
                 "note": note,
             }
             return json.dumps(payload, ensure_ascii=False)
