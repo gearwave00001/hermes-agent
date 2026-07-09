@@ -303,14 +303,28 @@ def acquire_provider(
             )
             continue
 
+        # Reserve the slot BEFORE health check to prevent TOCTOU race.
+        # If two subagents see the same free slot simultaneously, only one
+        # gets through because the second sees count == max_conc after
+        # the first has already incremented.
+        reserved = False
         with _state_lock:
             current = _active_counts.get(name, 0)
-            if current >= int(max_conc):
-                continue  # at capacity, try next
+            if current < int(max_conc):
+                _active_counts[name] = current + 1
+                reserved = True
 
-        # Health check
+        if not reserved:
+            continue  # at capacity — try next provider
+
+        # Health check runs OUTSIDE the lock; slot is already reserved.
         creds = _resolve_provider_credentials(name)
         if not creds:
+            with _state_lock:
+                if name in _active_counts and _active_counts[name] <= 1:
+                    del _active_counts[name]
+                else:
+                    _active_counts[name] -= 1
             continue
 
         if health_timeout > 0:
@@ -318,11 +332,12 @@ def acquire_provider(
                 logger.debug(
                     "Provider '%s' failed health check — skipping", name
                 )
+                with _state_lock:
+                    if name in _active_counts and _active_counts[name] <= 1:
+                        del _active_counts[name]
+                    else:
+                        _active_counts[name] -= 1
                 continue
-
-        # Acquire!
-        with _state_lock:
-            _active_counts[name] = _active_counts.get(name, 0) + 1
 
         logger.debug(
             "Acquired provider '%s' (priority routing), "
