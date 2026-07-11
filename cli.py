@@ -15178,10 +15178,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                                 from tools.process_registry import process_registry
                                 from tools.approval import get_current_session_key
                                 _drain_sk = get_current_session_key(default="")
-                                for _evt, _synth in process_registry.drain_notifications(session_key=_drain_sk):
+                                _drained = process_registry.drain_notifications(session_key=_drain_sk)
+                                if _drained:
+                                    logger.info(
+                                        "process_loop (idle): drained %d process notifications, "
+                                        "queuing into _pending_input",
+                                        len(_drained),
+                                    )
+                                for _evt, _synth in _drained:
                                     self._pending_input.put(_synth)
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning(
+                                    "process_loop (idle): drain_notifications failed: %s", _e
+                                )
                         continue
                     
                     if not user_input:
@@ -15340,10 +15349,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         # that arrived while the agent was running.
                         try:
                             from tools.process_registry import process_registry
-                            for _evt, _synth in process_registry.drain_notifications():
+                            _drained = process_registry.drain_notifications()
+                            if _drained:
+                                logger.info(
+                                    "process_loop (post-turn): drained %d process notifications, "
+                                    "queuing into _pending_input",
+                                    len(_drained),
+                                )
+                            for _evt, _synth in _drained:
                                 self._pending_input.put(_synth)
-                        except Exception:
-                            pass  # Non-fatal — don't break the main loop
+                        except Exception as _e:
+                            logger.warning(
+                                "process_loop (post-turn): drain_notifications failed: %s", _e
+                            )
 
                 except Exception as e:
                     logger.warning("process_loop unhandled error (msg may be lost): %s", e)

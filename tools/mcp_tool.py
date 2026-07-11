@@ -3923,6 +3923,77 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
+def _make_fetchWebContent_browser_fallback(handler, server_name: str, tool_name: str):
+    """Wrap a fetchWebContent handler with Camofox browser fallback.
+
+    When fetchWebContent fails with JS-rendered or no-content errors,
+    falls back to browser_navigate + browser_snapshot via Camofox.
+    Returns combined result so the model gets both error context and extracted content.
+    """
+    # Error patterns that indicate JS-rendered or no-content pages
+    _JS_RENDERED_PATTERNS = [
+        "No readable content was extracted",
+        "Request URL could not be resolved",
+        "Failed to fetch web content",
+    ]
+
+    def _is_js_error(result: str) -> bool:
+        try:
+            parsed = json.loads(result)
+            error_msg = parsed.get("error", "")
+            return any(p in error_msg for p in _JS_RENDERED_PATTERNS)
+        except (json.JSONDecodeError, AttributeError):
+            return any(p in result for p in _JS_RENDERED_PATTERNS)
+
+    def _fallback_handler(args: dict, **kwargs) -> str:
+        result = handler(args, **kwargs)
+
+        # Only fallback on JS-rendered/no-content errors
+        if not _is_js_error(result):
+            return result
+
+        # Check if Camofox is available
+        try:
+            from tools.browser_camofox import is_camofox_mode
+            if not is_camofox_mode():
+                return result
+        except ImportError:
+            return result
+
+        # Extract URL from args
+        url = args.get("url", "")
+        if not url:
+            return result
+
+        # Fall back to browser navigation via Camofox
+        try:
+            task_id = kwargs.get("task_id")
+            from tools.browser_tool import browser_navigate, browser_snapshot
+
+            # Navigate to the URL
+            nav_result = browser_navigate(url, task_id=task_id)
+            if not nav_result or "error" in nav_result.lower():
+                return result
+
+            # Get the snapshot
+            snapshot_result = browser_snapshot(task_id=task_id)
+            if snapshot_result and "error" not in snapshot_result.lower():
+                # Combine original error with browser content
+                original_error = json.loads(result).get("error", "Unknown error") if result else ""
+                return json.dumps({
+                    "result": snapshot_result,
+                    "fallback": "browser_camofox",
+                    "original_error": original_error,
+                    "note": "Content extracted via browser fallback (Camofox) after fetchWebContent failed on JS-rendered page"
+                }, ensure_ascii=False)
+        except Exception as e:
+            logger.debug("Camofox browser fallback failed for %s: %s", url, e)
+
+        return result
+
+    return _fallback_handler
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -4868,11 +4939,18 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             )
             continue
 
+        # Build the handler, then wrap fetchWebContent with browser fallback
+        tool_handler = _make_tool_handler(name, mcp_tool.name, server.tool_timeout)
+        if mcp_tool.name == "fetchWebContent":
+            tool_handler = _make_fetchWebContent_browser_fallback(
+                tool_handler, name, mcp_tool.name
+            )
+
         registry.register(
             name=tool_name_prefixed,
             toolset=toolset_name,
             schema=schema,
-            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
+            handler=tool_handler,
             check_fn=_make_check_fn(name),
             is_async=False,
             description=schema["description"],

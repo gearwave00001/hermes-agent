@@ -1404,6 +1404,51 @@ def test_drain_notifications_filters_async_delegation_by_session_key():
             process_registry.completion_queue.get_nowait()
 
 
+def test_drain_notifications_does_not_skip_async_delegation_events():
+    """async_delegation events must NOT be skipped by _drain_should_skip.
+
+    Even if the session_key happens to match a consumed session_id,
+    async_delegation events route via session_key (not session_id) and
+    should always pass through the drain.
+    """
+    from tools.process_registry import process_registry
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    # Mark a session as consumed — this should NOT affect async_delegation events
+    process_registry._completion_consumed.add("fake_sid")
+
+    # Push an async_delegation event with a session_id that IS consumed
+    process_registry.completion_queue.put({
+        "type": "async_delegation",
+        "delegation_id": "deleg_test_skip",
+        "session_key": "",
+        "session_id": "fake_sid",  # matches consumed set — should NOT be skipped
+        "goal": "Test goal",
+        "status": "completed",
+        "summary": "Test summary",
+        "model": "test-model",
+        "api_calls": 3,
+        "duration_seconds": 10.0,
+        "dispatched_at": 1000000.0,
+        "completed_at": 1000010.0,
+    })
+
+    try:
+        results = process_registry.drain_notifications()
+        assert len(results) == 1, (
+            f"Expected 1 result but got {len(results)} — "
+            "async_delegation event was incorrectly skipped"
+        )
+        assert results[0][0]["delegation_id"] == "deleg_test_skip"
+        assert "ASYNC DELEGATION" in results[0][1]
+    finally:
+        process_registry._completion_consumed.discard("fake_sid")
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
 def test_drain_notifications_no_filter_passes_all_async_delegation():
     """Without a session_key filter, all async-delegation events are consumed.
 
@@ -1445,6 +1490,69 @@ def test_drain_notifications_no_filter_passes_all_async_delegation():
         ids = {r[0]["delegation_id"] for r in results}
         assert ids == {"deleg_1", "deleg_2"}
     finally:
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
+def test_drain_notifications_skips_only_type_completion():
+    """_drain_should_skip is only checked for type='completion', not watch_match
+    or async_delegation. This is an invariant: the skip logic was designed for
+    terminal process completions that the agent already consumed via wait/log/poll.
+    """
+    from tools.process_registry import process_registry
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    process_registry._completion_consumed.add("skip_me")
+
+    # completion event — should be skipped
+    process_registry.completion_queue.put({
+        "type": "completion",
+        "session_id": "skip_me",
+        "command": "echo skip",
+        "exit_code": 0,
+        "output": "skip",
+    })
+
+    # watch_match — should NOT be skipped even with same session_id
+    process_registry.completion_queue.put({
+        "type": "watch_match",
+        "session_id": "skip_me",
+        "command": "tail -f x",
+        "pattern": "ERR",
+        "output": "ERR found",
+        "suppressed": 0,
+    })
+
+    # async_delegation — should NOT be skipped
+    process_registry.completion_queue.put({
+        "type": "async_delegation",
+        "delegation_id": "deleg_watch",
+        "session_key": "",
+        "session_id": "skip_me",
+        "goal": "Watch goal",
+        "status": "completed",
+        "summary": "Watch summary",
+        "model": "test",
+        "api_calls": 1,
+        "duration_seconds": 5.0,
+        "dispatched_at": 1000000.0,
+        "completed_at": 1000005.0,
+    })
+
+    try:
+        results = process_registry.drain_notifications()
+        assert len(results) == 2, (
+            f"Expected 2 results (watch_match + async_delegation) but got {len(results)}"
+        )
+        # Verify the completion event was skipped
+        types = [r[0]["type"] for r in results]
+        assert "completion" not in types
+        assert "watch_match" in types
+        assert "async_delegation" in types
+    finally:
+        process_registry._completion_consumed.discard("skip_me")
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()
 
@@ -1492,6 +1600,80 @@ def test_drain_notifications_owns_event_callback_beats_key_equality():
             process_registry.completion_queue.get_nowait()
 
 
+def test_drain_notifications_logs_skipped_and_dropped():
+    """Verify drain_notifications emits structured logs for skipped and dropped events.
+
+    This is a regression test: previously, drain_notifications was completely silent
+    about skipped events, making it impossible to diagnose why completions never
+    surfaced in the CLI.
+    """
+    import logging
+    from tools.process_registry import process_registry
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    # Set up log capture
+    handler = logging.Handler()
+    handler.records = []
+    handler.emit = lambda record: handler.records.append(record)
+    logger = logging.getLogger("tools.process_registry")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
+    try:
+        # Add a consumed completion (should be skipped)
+        process_registry._completion_consumed.add("logged_skip")
+        process_registry.completion_queue.put({
+            "type": "completion",
+            "session_id": "logged_skip",
+            "command": "echo skip",
+            "exit_code": 0,
+            "output": "skip",
+        })
+
+        # Add a valid async_delegation (should be formatted)
+        process_registry.completion_queue.put({
+            "type": "async_delegation",
+            "delegation_id": "deleg_logged",
+            "session_key": "",
+            "goal": "Logged goal",
+            "status": "completed",
+            "summary": "Logged summary",
+            "model": "test",
+            "api_calls": 1,
+            "duration_seconds": 5.0,
+            "dispatched_at": 1000000.0,
+            "completed_at": 1000005.0,
+        })
+
+        results = process_registry.drain_notifications()
+
+        # Verify results
+        assert len(results) == 1
+        assert results[0][0]["delegation_id"] == "deleg_logged"
+
+        # Verify logging
+        log_messages = [r.getMessage() for r in handler.records]
+        # Should have a skip log
+        assert any("skipped completion" in msg for msg in log_messages), (
+            f"No skip log found in: {log_messages}"
+        )
+        # Should have a formatted log
+        assert any("formatted async_delegation" in msg for msg in log_messages), (
+            f"No formatted log found in: {log_messages}"
+        )
+        # Should have a summary log
+        assert any("drained" in msg for msg in log_messages), (
+            f"No drain summary log found in: {log_messages}"
+        )
+    finally:
+        logger.removeHandler(handler)
+        process_registry._completion_consumed.discard("logged_skip")
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
 def test_drain_notifications_owns_event_callback_fails_closed():
     """A broken ownership callback must re-queue (never leak) the event."""
     from tools.process_registry import process_registry
@@ -1521,6 +1703,104 @@ def test_drain_notifications_owns_event_callback_fails_closed():
             process_registry.completion_queue.get_nowait()
 
 
+def test_async_delegation_completion_queue_survives_drain():
+    """End-to-end: push async_delegation event -> drain -> verify formatted output.
+
+    Tests the full chain from _push_completion_event through drain_notifications
+    to ensure the formatted text is self-contained enough for the agent to act on.
+    """
+    from tools.process_registry import process_registry
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    evt = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_e2e_test",
+        "session_key": "test_session",
+        "goal": "Research something important",
+        "context": "Background context",
+        "toolsets": ["web", "terminal"],
+        "role": "leaf",
+        "model": "test-model",
+        "status": "completed",
+        "summary": "Found 3 relevant papers and wrote a summary.",
+        "api_calls": 5,
+        "duration_seconds": 45.2,
+        "dispatched_at": 1000000.0,
+        "completed_at": 1000045.2,
+    }
+    process_registry.completion_queue.put(evt)
+
+    try:
+        results = process_registry.drain_notifications()
+        assert len(results) == 1
+        raw_evt, formatted = results[0]
+
+        # Verify the formatted text is self-contained
+        assert "ASYNC DELEGATION" in formatted
+        assert "deleg_e2e_test" in formatted
+        assert "Research something important" in formatted
+        assert "Found 3 relevant papers" in formatted
+        assert "test-model" in formatted
+        assert "leaf" in formatted
+    finally:
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
+def test_completion_queue_is_in_memory_only():
+    """Verify that completion_queue is an in-memory queue — events do NOT survive
+    process restarts. This documents a known limitation: if the CLI/gateway
+    restarts before draining, queued completions are lost.
+
+    This is NOT a bug to fix (it's the nature of in-memory queues), but it IS
+    the root cause of the 'mysterious missing completions' when the CLI restarts
+    while subagents are still running.
+    """
+    import queue
+    from tools.process_registry import process_registry
+
+    # Verify the queue type
+    assert isinstance(process_registry.completion_queue, queue.Queue), (
+        "completion_queue should be a standard in-memory queue"
+    )
+
+    # Push an event
+    process_registry.completion_queue.put({
+        "type": "async_delegation",
+        "delegation_id": "deleg_inmemory",
+        "session_key": "",
+        "goal": "Test",
+        "status": "completed",
+        "summary": "Test",
+        "model": "test",
+        "api_calls": 1,
+        "duration_seconds": 1.0,
+        "dispatched_at": 1000000.0,
+        "completed_at": 1000001.0,
+    })
+
+    assert not process_registry.completion_queue.empty()
+
+    # Simulate "restart" by creating a fresh queue (what happens on module reload)
+    old_queue = process_registry.completion_queue
+    process_registry.completion_queue = queue.Queue()
+
+    # Old queue still has the event — but the registry no longer references it
+    assert not old_queue.empty()
+    assert process_registry.completion_queue.empty()
+
+    # Drain on the new queue returns nothing
+    results = process_registry.drain_notifications()
+    assert len(results) == 0, (
+        "New queue should be empty — event was lost during simulated restart"
+    )
+
+    # Restore
+    process_registry.completion_queue = old_queue
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
 # ---------------------------------------------------------------------------
 # _terminate_host_pid — cross-platform process-tree termination
 # ---------------------------------------------------------------------------
