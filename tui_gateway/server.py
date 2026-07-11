@@ -3154,6 +3154,7 @@ def _persist_model_switch(result) -> None:
     # destroys sibling keys the user set under `model:` — `model_slots`,
     # `model_fallback`, etc. — when switching models from the TUI (#48305).
     from cli import save_config_value
+    from hermes_cli.model_switch import _update_main_server_on_switch
 
     save_config_value("model.default", result.new_model)
     save_config_value("model.provider", result.target_provider)
@@ -3166,6 +3167,10 @@ def _persist_model_switch(result) -> None:
         # removal without needing a key-delete. Leaving the old value would
         # route the new model at the previous custom host (#48305).
         save_config_value("model.base_url", None)
+
+    # Keep subagent_routing.main_server in sync with the main conversation's
+    # provider so subagents know which server to exclude from their pool.
+    _update_main_server_on_switch(result)
 
 
 def _snapshot_agent_model_runtime(agent) -> dict:

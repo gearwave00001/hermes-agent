@@ -8176,6 +8176,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # need (#25106).
             save_config_value("model.base_url", result.base_url or None)
             save_config_value("model.api_mode", result.api_mode or None)
+            # When switching to a custom provider (named server), update
+            # subagent_routing.main_server so the main conversation's server
+            # stays in sync with model.base_url.
+            from hermes_cli.model_switch import _update_main_server_on_switch
+            _update_main_server_on_switch(result)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
