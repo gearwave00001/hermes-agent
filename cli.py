@@ -7954,6 +7954,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            # Persist model.base_url so custom endpoints survive across sessions.
+            # Mirrors _persist_model_switch() in tui_gateway/server.py — the TUI
+            # path already saved this, but the CLI path did not (#48305).
+            if result.base_url:
+                save_config_value("model.base_url", result.base_url)
+            else:
+                save_config_value("model.base_url", None)
+            # When switching to a custom provider (named server), update
+            # subagent_routing.main_server so the main conversation's server
+            # stays in sync with model.base_url.
+            from hermes_cli.model_switch import _update_main_server_on_switch
+            _update_main_server_on_switch(result)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
