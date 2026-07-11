@@ -2620,3 +2620,39 @@ def list_picker_providers(
         filtered.append(p)
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# subagent_routing.main_server sync
+# ---------------------------------------------------------------------------
+
+def _update_main_server_on_switch(result) -> None:
+    """Update ``subagent_routing.main_server`` when the model switch targets a custom provider.
+
+    When the user switches to a named custom provider (e.g., ``custom:192.168.1.225``),
+    this extracts the server name and writes it into
+    ``subagent_routing.main_server`` so subagent routing knows which server
+    hosts the main conversation and can exclude it from the priority pool
+    (when ``exclude_from_subagents: true``).
+
+    When switching away from a custom provider (e.g., to OpenRouter or Anthropic),
+    the main_server is cleared (set to ``None``) so stale entries don't linger.
+
+    Called from both ``_apply_model_switch_result`` (cli.py) and
+    ``_persist_model_switch`` (tui_gateway/server.py).
+    """
+    try:
+        from cli import save_config_value
+
+        provider = result.target_provider or ""
+        if provider.startswith("custom:"):
+            # Extract the server name after "custom:"
+            server_name = provider[len("custom:"):]
+            save_config_value("subagent_routing.main_server", server_name)
+        else:
+            # Non-custom provider — clear any stale main_server value
+            save_config_value("subagent_routing.main_server", None)
+    except Exception as exc:
+        logger.debug(
+            "Failed to update subagent_routing.main_server on model switch: %s", exc
+        )
