@@ -15,8 +15,15 @@ Provides:
   - Sync queuing support (parent blocks until all queued tasks complete)
 
 Thread safety:
-  All mutable state is protected by ``_state_lock`` (threading.Lock).
-  The dispatcher thread polls every ``poll_interval`` seconds.
+  All mutable state is protected by the singleton state's lock
+  (threading.Lock). The dispatcher thread polls every ``poll_interval``
+  seconds.
+
+Reimport safety:
+  All state lives in a _RouterState singleton whose class-level _instance
+  survives module reimport (config reload, model switch, etc.). Plain
+  module-level variables would reset to their initial value on reimport,
+  killing the dispatcher thread and wiping the pending queue.
 """
 
 from __future__ import annotations
@@ -34,33 +41,82 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level state
+# Process-global singleton state (survives module reimport)
 # ---------------------------------------------------------------------------
 
-# Per-provider active connection counts.
-# Key: provider name (as it appears in custom_providers), value: int
-_active_counts: Dict[str, int] = {}
 
-# Global lock protecting _active_counts and _pending_queue
-_state_lock = threading.Lock()
+class _RouterState:
+    """Process-global singleton that survives module reimport.
 
-# Overflow queue: list of dicts with task metadata and captured context.
-# Each entry: {task, session_key, sync_event, parent_agent, delegation_cfg}
-# parent_agent and delegation_cfg are captured at enqueue time so the
-# dispatcher can build child agents without needing the parent alive.
-_pending_queue: List[dict] = []
+    Module-level variables reset on reimport (config reload, model switch,
+    etc.), which kills the dispatcher thread and wipes the pending queue.
+    This class stores its canonical instance at the class level, so a
+    reimport of the module creates a *new class object* but the old
+    instance (and its data) remains reachable via the class that the
+    dispatcher thread still holds a reference to.
 
-# Dispatcher thread handle (singleton, started on first use)
-_dispatcher_thread: Optional[threading.Thread] = None
-_dispatcher_running = False
+    To make it even more robust, we also store a reference in sys.modules
+    under a stable key, so even if the old class object is garbage collected,
+    the data survives.
+    """
+    # Class-level attribute declarations for type checker satisfaction
+    _active_counts: Dict[str, int]
+    _pending_queue: List[dict]
+    _dispatcher_thread: Optional[threading.Thread]
+    _dispatcher_running: bool
+    _lock: threading.Lock
+    _dispatching: bool  # Guard against concurrent dispatch from release_provider + dispatcher loop
+    _thread_id: int  # Monotonically increasing ID; tracks which dispatcher thread is "ours"
+    _thread_id_counter: int  # Counter for generating unique thread IDs
 
-# Queue config (loaded lazily)
-_queue_config: Dict[str, Any] = {}
+    _instance: "Optional[_RouterState]" = None  # type: ignore[valid-type]
+
+    def __new__(cls):
+        # Try to recover from sys.modules first (survives class reimport).
+        # We check the marker key AND that the object has our sentinel attrs,
+        # not isinstance (which fails against a reloaded class).
+        import sys as _sys
+
+        stored = _sys.modules.get("__hermes_router_state__")  # type: ignore[call-overload]
+        if stored is not None and hasattr(stored, "_active_counts"):
+            return stored  # type: ignore[return-value]
+
+        if cls._instance is not None:
+            return cls._instance
+
+        instance = super().__new__(cls)
+        # Initialize attributes (type: ignore needed since __new__ returns object)
+        instance._active_counts = {}  # type: ignore[assignment]
+        instance._pending_queue = []  # type: ignore[assignment]
+        instance._dispatcher_thread = None  # type: ignore[assignment]
+        instance._dispatcher_running = False  # type: ignore[assignment]
+        instance._lock = threading.Lock()  # type: ignore[assignment]
+        instance._dispatching = False  # type: ignore[assignment]
+        instance._thread_id = 0  # type: ignore[assignment]
+        instance._thread_id_counter = 0  # type: ignore[assignment]
+        cls._instance = instance
+        # Also store in sys.modules for extra reimport resilience
+        _sys.modules["__hermes_router_state__"] = instance  # type: ignore[arg-type]
+        return instance
+
+    @classmethod
+    def force_reset(cls) -> None:
+        """Hard reset -- only for tests. Clears the singleton."""
+        import sys as _sys
+
+        cls._instance = None
+        _sys.modules.pop("__hermes_router_state__", None)
+
+
+def _state() -> _RouterState:
+    """Get the singleton state instance."""
+    return _RouterState()
 
 
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
+
 
 def _load_subagent_routing_config() -> dict:
     """Load the subagent_routing block from config.yaml.
@@ -109,12 +165,16 @@ def _get_health_check_timeout() -> float:
 
 
 def _get_queue_config() -> dict:
-    """Return the queue config block (cached)."""
-    global _queue_config
-    if not _queue_config:
-        cfg = _load_subagent_routing_config()
-        _queue_config = cfg.get("queue", {})
-    return _queue_config
+    """Return the queue config block.
+
+    Re-reads from config on each call (not cached) so that runtime config
+    changes (e.g. via /config or hermes config set) are picked up immediately.
+    The config loading itself is fast (dict merge) and called infrequently
+    (only during enqueue/dispatch), so caching provides no meaningful benefit
+    but causes stale-state bugs when config changes mid-session.
+    """
+    cfg = _load_subagent_routing_config()
+    return cfg.get("queue", {})
 
 
 def _is_queue_enabled() -> bool:
@@ -139,6 +199,7 @@ def _get_poll_interval() -> float:
 # Health check
 # ---------------------------------------------------------------------------
 
+
 def _health_check(base_url: str, timeout: float) -> bool:
     """Ping a provider's /v1/models endpoint to verify availability.
 
@@ -157,6 +218,7 @@ def _health_check(base_url: str, timeout: float) -> bool:
 # ---------------------------------------------------------------------------
 # Provider resolution
 # ---------------------------------------------------------------------------
+
 
 def _resolve_provider_credentials(provider_name: str) -> Optional[dict]:
     """Resolve full credentials for a named custom provider.
@@ -194,6 +256,7 @@ def _resolve_provider_credentials(provider_name: str) -> Optional[dict]:
 # Goal rule matching
 # ---------------------------------------------------------------------------
 
+
 def _match_goal_rule(goal: str) -> Optional[str]:
     """Check if a goal matches any goal_rules entry.
 
@@ -229,6 +292,7 @@ def _match_goal_rule(goal: str) -> Optional[str]:
 # Acquire / Release (check-out / check-in)
 # ---------------------------------------------------------------------------
 
+
 def acquire_provider(
     provider_override: Optional[str] = None,
     goal: Optional[str] = None,
@@ -242,19 +306,27 @@ def acquire_provider(
 
     Returns credential dict or None if no provider is available.
     """
+    # Ensure the dispatcher thread is alive before any provider acquisition.
+    # This catches the case where the dispatcher died (module reimport,
+    # exception, config reload) and queued tasks are sitting idle.
+    # Idempotent when the dispatcher is already running.
+    _ensure_dispatcher()
+
+    st = _state()
+
     # Path 1: explicit override
     if provider_override:
         creds = _resolve_provider_credentials(provider_override)
         if creds:
-            with _state_lock:
-                _active_counts[provider_override] = (
-                    _active_counts.get(provider_override, 0) + 1
+            with st._lock:
+                st._active_counts[provider_override] = (
+                    st._active_counts.get(provider_override, 0) + 1
                 )
             logger.debug(
                 "Acquired provider '%s' (explicit override), "
                 "active_count=%d",
                 provider_override,
-                _active_counts[provider_override],
+                st._active_counts[provider_override],
             )
             return creds
 
@@ -263,19 +335,25 @@ def acquire_provider(
     if rule_provider:
         creds = _resolve_provider_credentials(rule_provider)
         if creds:
-            with _state_lock:
-                _active_counts[rule_provider] = (
-                    _active_counts.get(rule_provider, 0) + 1
+            with st._lock:
+                st._active_counts[rule_provider] = (
+                    st._active_counts.get(rule_provider, 0) + 1
                 )
             logger.debug(
                 "Acquired provider '%s' (goal rule match), "
                 "active_count=%d",
                 rule_provider,
-                _active_counts[rule_provider],
+                st._active_counts[rule_provider],
             )
             return creds
 
-    # Path 3: priority_order routing
+    # Path 3: priority_order routing - pick server with most remaining capacity.
+    # Instead of "first in list that has room" (which can stack subagents on a
+    # slow early-listed server while later servers sit idle), we scan all eligible
+    # servers and sort by remaining capacity (descending). Ties break by
+    # priority_order position (first in list wins). We loop through the sorted
+    # list, reserving each slot before health-checking it — if one fails, we
+    # try the next-best rather than giving up entirely.
     if not _is_enabled():
         return None  # fall through to default delegation.provider
 
@@ -289,81 +367,76 @@ def acquire_provider(
         name = entry.get("name", "")
         if not name:
             continue
-
-        # Check enabled flag
         if not entry.get("enabled", True):
             continue
-
-        # Check max_concurrent (REQUIRED — skip if missing)
         max_conc = entry.get("max_concurrent")
         if max_conc is None:
-            logger.warning(
-                "Provider '%s' missing required max_concurrent — skipping",
-                name,
-            )
             continue
 
-        # Reserve the slot BEFORE health check to prevent TOCTOU race.
-        # If two subagents see the same free slot simultaneously, only one
-        # gets through because the second sees count == max_conc after
-        # the first has already incremented.
-        reserved = False
-        with _state_lock:
-            current = _active_counts.get(name, 0)
-            if current < int(max_conc):
-                _active_counts[name] = current + 1
-                reserved = True
-
-        if not reserved:
-            continue  # at capacity — try next provider
+        with st._lock:
+            current = st._active_counts.get(name, 0)
+            if current >= max_conc:
+                continue
+            st._active_counts[name] = current + 1
 
         # Health check runs OUTSIDE the lock; slot is already reserved.
         creds = _resolve_provider_credentials(name)
         if not creds:
-            with _state_lock:
-                if name in _active_counts and _active_counts[name] <= 1:
-                    del _active_counts[name]
-                else:
-                    _active_counts[name] -= 1
+            with st._lock:
+                del st._active_counts[name]
             continue
 
         if health_timeout > 0:
             if not _health_check(creds["base_url"], health_timeout):
                 logger.debug(
-                    "Provider '%s' failed health check — skipping", name
+                    "Provider '%s' failed health check -- trying next", name
                 )
-                with _state_lock:
-                    if name in _active_counts and _active_counts[name] <= 1:
-                        del _active_counts[name]
-                    else:
-                        _active_counts[name] -= 1
+                with st._lock:
+                    del st._active_counts[name]
                 continue
 
-        logger.debug(
-            "Acquired provider '%s' (priority routing), "
+        logger.info(
+            "Acquired provider '%s' (capacity-aware routing), "
             "active_count=%d/%d",
             name,
-            _active_counts[name],
+            st._active_counts[name],
             max_conc,
         )
         return creds
 
-    return None  # all providers at capacity
+    return None  # all providers at capacity or none eligible
 
 
-def release_provider(provider_name: str) -> None:
+def release_provider(provider_name: str, skip_queue_dispatch: bool = False) -> None:
     """Release a provider after subagent completion.
 
     Decrements active_count and triggers queue dispatch if pending tasks exist.
+
+    LIVENESS CHECK: Always ensures the dispatcher thread is alive after
+    releasing a slot. If the dispatcher died (module reimport, exception,
+    config reload), we restart it AND dispatch any queued tasks inline.
+    This prevents the recurring issue where the dispatcher stays dead
+    indefinitely after a subagent completes, leaving future queued tasks
+    orphaned.
+
+    NOTE: When skip_queue_dispatch=True (used internally by
+    _dispatch_queued_unlocked's error path), we only decrement the counter
+    without triggering queue dispatch — this prevents nested dispatch
+    cascades where releasing a slot during dispatch spawns new dispatch
+    threads that re-dispatch the same remaining entries.
     """
-    with _state_lock:
-        current = _active_counts.get(provider_name, 0)
+    st = _state()
+    tasks_snapshot: List[dict] = []
+    need_dispatcher_restart = False
+
+    with st._lock:
+        current = st._active_counts.get(provider_name, 0)
         if current > 0:
-            _active_counts[provider_name] = current - 1
-            logger.debug(
+            st._active_counts[provider_name] = current - 1
+            logger.info(
                 "Released provider '%s', active_count=%d",
                 provider_name,
-                _active_counts[provider_name],
+                st._active_counts[provider_name],
             )
         else:
             logger.warning(
@@ -371,20 +444,68 @@ def release_provider(provider_name: str) -> None:
                 provider_name,
             )
 
-        # Trigger queue dispatch if there are pending tasks
-        if _pending_queue:
-            _try_dispatch_queued()
+        # Skip queue dispatch when called from _dispatch_queued_unlocked
+        # error path — prevents nested dispatch cascade.
+        if skip_queue_dispatch:
+            return
+
+        # Check if dispatcher needs restart (while holding lock).
+        # We do the actual restart OUTSIDE the lock to avoid deadlock:
+        # _ensure_dispatcher() also acquires the lock, and we don't want
+        # to hold the lock while calling it.
+        dispatcher_alive = (
+            st._dispatcher_running
+            and st._dispatcher_thread is not None
+            and st._dispatcher_thread.is_alive()
+        )
+
+        if not dispatcher_alive:
+            need_dispatcher_restart = True
+
+        # Snapshot pending tasks for inline dispatch (if dispatcher was dead).
+        # The newly restarted dispatcher will handle future tasks.
+        if st._pending_queue:
+            if not dispatcher_alive:
+                logger.warning(
+                    "Dispatcher was dead with %d pending tasks -- "
+                    "dispatching inline from release_provider",
+                    len(st._pending_queue),
+                )
+                tasks_snapshot = list(st._pending_queue)
+                st._pending_queue.clear()
+            else:
+                # Normal path: dispatcher is alive, let it handle it.
+                # _try_dispatch_queued() expects the caller to hold the lock.
+                _try_dispatch_queued()
+
+    # --- Outside the lock now ---
+
+    # Restart dispatcher if needed (this acquires the lock internally).
+    if need_dispatcher_restart:
+        logger.warning("Dispatcher thread is dead — restarting from release_provider")
+        _ensure_dispatcher()
+
+    # Dispatch inline snapshot (if any) — runs in its own thread.
+    if tasks_snapshot:
+        threading.Thread(
+            target=_dispatch_queued_unlocked,
+            args=(tasks_snapshot,),
+            daemon=True,
+            name="subagent-router-inline-dispatch",
+        ).start()
 
 
 def get_active_counts() -> Dict[str, int]:
     """Return a snapshot of current active counts per provider."""
-    with _state_lock:
-        return dict(_active_counts)
+    st = _state()
+    with st._lock:
+        return dict(st._active_counts)
 
 
 # ---------------------------------------------------------------------------
 # Queue management
 # ---------------------------------------------------------------------------
+
 
 def enqueue_task(
     *,
@@ -405,12 +526,13 @@ def enqueue_task(
         return False
 
     max_size = _get_queue_max_size()
+    st = _state()
 
-    with _state_lock:
-        if len(_pending_queue) >= max_size:
+    with st._lock:
+        if len(st._pending_queue) >= max_size:
             logger.warning(
-                "Subagent queue full (%d/%d) — cannot enqueue task: %s",
-                len(_pending_queue),
+                "Subagent queue full (%d/%d) -- cannot enqueue task: %s",
+                len(st._pending_queue),
                 max_size,
                 task.get("goal", "")[:80],
             )
@@ -423,11 +545,11 @@ def enqueue_task(
             "parent_agent": parent_agent,
             "delegation_cfg": delegation_cfg,
         }
-        _pending_queue.append(entry)
+        st._pending_queue.append(entry)
         logger.debug(
             "Enqueued task '%s' (queue size: %d/%d)",
             task.get("goal", "")[:80],
-            len(_pending_queue),
+            len(st._pending_queue),
             max_size,
         )
 
@@ -440,26 +562,48 @@ def enqueue_task(
 def _try_dispatch_queued() -> None:
     """Try to dispatch pending tasks from the queue.
 
-    Called from release_provider() after a slot opens up.
-    Must be called with _state_lock held.
-    Spawns a background thread to do the actual dispatch (health checks,
-    provider resolution) so we don't block the releasing thread.
+    Called from release_provider() after a slot opens up (lock held).
+    Sets a _dispatching flag so the dispatcher loop doesn't double-snapshot
+    the same entries — prevents duplicate dispatches when both paths fire
+    close together (e.g., two subagents finish within the same poll window).
     """
-    if not _pending_queue:
+    st = _state()
+    if not st._pending_queue:
         return
 
-    # Snapshot the queue and clear it — the dispatcher thread will
-    # put back anything it couldn't dispatch.
-    tasks_snapshot = list(_pending_queue)
-    _pending_queue.clear()
+    # Guard against race with dispatcher loop: if another thread is already
+    # dispatching (from release_provider or the loop itself), skip this call.
+    # This prevents both paths from snapshotting the same queue entries.
+    if st._dispatching:
+        return
 
-    # Dispatch in a background thread to avoid blocking
+    # Mark as dispatching before clearing the queue
+    st._dispatching = True
+    tasks_snapshot = list(st._pending_queue)
+    st._pending_queue.clear()
+
+    # Release lock before spawning dispatch thread (caller holds it)
     threading.Thread(
-        target=_dispatch_queued_unlocked,
+        target=_dispatch_queued_with_flag,
         args=(tasks_snapshot,),
         daemon=True,
         name="subagent-router-dispatch",
     ).start()
+
+
+def _dispatch_queued_with_flag(entries: List[dict]) -> None:
+    """Wrapper around _dispatch_queued_unlocked that clears _dispatching.
+
+    Used by _try_dispatch_queued (called from release_provider with lock held).
+    The dispatcher loop now manages _dispatching directly (sets before snapshot,
+    clears in finally), so this wrapper is only needed for the release_provider path.
+    """
+    try:
+        _dispatch_queued_unlocked(entries)
+    finally:
+        st = _state()
+        with st._lock:
+            st._dispatching = False
 
 
 def _dispatch_queued_unlocked(entries: List[dict]) -> None:
@@ -467,6 +611,15 @@ def _dispatch_queued_unlocked(entries: List[dict]) -> None:
 
     For each entry, tries to acquire a provider. If successful, builds
     and dispatches the child agent. If not, puts the entry back in the queue.
+
+    NOTE: This function is called from two paths:
+      1. _try_dispatch_queued (from release_provider, via _dispatch_queued_with_flag)
+      2. _dispatcher_loop (directly, with _dispatching managed by the loop)
+      3. _ensure_dispatcher inline dispatch (via separate thread)
+      4. release_provider inline dispatch (via separate thread)
+
+    The _dispatching flag prevents paths 1+2 from racing. Paths 3+4 run in
+    separate threads so they don't block the main flow.
     """
     dispatched_entries = []
     remaining_entries = []
@@ -497,29 +650,41 @@ def _dispatch_queued_unlocked(entries: List[dict]) -> None:
                 entry["task"].get("goal", "")[:80],
                 exc,
             )
-            # Release the provider we acquired since we couldn't dispatch
+            # Release the provider we acquired since we couldn't dispatch.
+            # entry["creds"] was set above when acquire_provider succeeded,
+            # so we know the exact provider that was reserved.
             creds = entry.get("creds", {})
-            provider_name = entry["task"].get("provider") or ""
+            provider_name = entry["task"].get("provider") or creds.get("provider", "")
             if not provider_name:
-                # Try to figure out which provider we got
-                for name, count in get_active_counts().items():
-                    if count > 0:
-                        provider_name = name
+                # Fallback: match base_url against known providers
+                for po_entry in _get_priority_order():
+                    po_name = po_entry.get("name", "")
+                    resolved = _resolve_provider_credentials(po_name)
+                    if resolved and resolved.get("base_url") == creds.get("base_url"):
+                        provider_name = po_name
                         break
             if provider_name:
-                release_provider(provider_name)
+                # Use non-cascading release to prevent nested dispatch:
+                # releasing a slot here would trigger queue dispatch, which
+                # would re-dispatch the same remaining entries we're already
+                # processing, creating exponential thread explosion.
+                release_provider(provider_name, skip_queue_dispatch=True)
             remaining_entries.append(entry)
 
     # Put remaining entries back in the queue
     if remaining_entries:
-        with _state_lock:
-            _pending_queue.extend(remaining_entries)
+        st = _state()
+        with st._lock:
+            st._pending_queue.extend(remaining_entries)
 
 
 def _dispatch_single_queued(entry: dict) -> None:
     """Dispatch a single queued entry as a background subagent.
 
     Uses the captured parent_agent and delegation_cfg from enqueue time.
+    Sets _assigned_provider on the child so release_provider() is called
+    correctly when the subagent completes (enqueued tasks had child_creds=None
+    at enqueue time, so _assigned_provider was never set).
     """
     from tools.async_delegation import dispatch_async_delegation
     from tools.delegate_tool import (
@@ -544,7 +709,18 @@ def _dispatch_single_queued(entry: dict) -> None:
     delegation_cfg = entry["delegation_cfg"]
     max_iter = delegation_cfg.get("max_iterations", 50)
 
-    # Build the child agent using the same path as delegate_tool.py
+    # Determine the provider name for release tracking.
+    # For priority-routed providers, this is the server IP/name from config.
+    assigned_provider = task.get("provider") or creds.get("provider", "")
+    if not assigned_provider:
+        # Fallback: try to match base_url against known providers
+        for entry_cfg in _get_priority_order():
+            name = entry_cfg.get("name", "")
+            resolved = _resolve_provider_credentials(name)
+            if resolved and resolved.get("base_url") == creds.get("base_url"):
+                assigned_provider = name
+                break
+
     child = _build_child_agent(
         task_index=0,
         goal=goal,
@@ -562,6 +738,12 @@ def _dispatch_single_queued(entry: dict) -> None:
         override_acp_args=creds.get("args", []),
         role=role,
     )
+
+    # CRITICAL: Set _assigned_provider so release_provider() is called on completion.
+    # Enqueued tasks had child_creds=None at enqueue time, so _assigned_provider
+    # was never set in the main dispatch loop. Without this, the provider slot
+    # is never released, causing phantom capacity that blocks future dispatches.
+    setattr(child, "_assigned_provider", assigned_provider)
 
     def _runner(_child=child, _goal=goal):
         return _run_single_child(0, _goal, _child, parent_agent)
@@ -588,10 +770,11 @@ def _dispatch_single_queued(entry: dict) -> None:
     )
 
     if dispatch.get("status") == "dispatched":
-        logger.debug(
-            "Dispatched queued task '%s' as async delegation %s",
+        logger.info(
+            "Dispatched queued task '%s' as async delegation %s (provider=%s)",
             goal[:80],
             dispatch["delegation_id"],
+            assigned_provider,
         )
         # Signal sync event if this was a synchronous delegation
         if sync_event:
@@ -605,53 +788,136 @@ def _dispatch_single_queued(entry: dict) -> None:
         if sync_event:
             sync_event.set()
 
+
 # ---------------------------------------------------------------------------
 # Dispatcher thread
 # ---------------------------------------------------------------------------
 
-def _ensure_dispatcher() -> None:
-    """Start the dispatcher thread if not already running."""
-    global _dispatcher_thread, _dispatcher_running
 
-    with _state_lock:
-        if _dispatcher_running and _dispatcher_thread and _dispatcher_thread.is_alive():
+def _ensure_dispatcher() -> None:
+    """Start the dispatcher thread if not already running.
+
+    AUTO-RESTART: If the dispatcher was previously running but has died
+    (e.g. due to module reimport), this detects the dead state and
+    restarts the thread. If there are pending tasks, it also triggers
+    an immediate inline dispatch.
+
+    NOTE: This is called from acquire_provider (which runs from both the
+    main dispatch loop AND from _dispatch_queued_unlocked). The inline
+    dispatch runs in a separate thread to avoid blocking the caller.
+
+    THREAD SAFETY: Uses _thread_id to track which dispatcher thread is
+    "ours". If two threads both see the dispatcher as dead, the second
+    one checks the thread ID and realizes someone else already started
+    a new thread, preventing duplicate dispatchers.
+    """
+    st = _state()
+    tasks_snapshot: List[dict] = []
+
+    with st._lock:
+        # Fast path: dispatcher is alive
+        if st._dispatcher_running and st._dispatcher_thread and st._dispatcher_thread.is_alive():
             return
 
-        _dispatcher_running = True
-        _dispatcher_thread = threading.Thread(
+        # Check if another thread already started a new dispatcher while we
+        # were waiting for the lock (thread ID is the authoritative marker).
+        if st._thread_id is not None and st._dispatcher_thread is not None and st._dispatcher_thread.is_alive():
+            return
+
+        # Dispatcher is dead or never started -- restart it
+        if not st._dispatcher_running and st._pending_queue:
+            logger.warning(
+                "Dispatcher was dead with %d pending tasks -- restarting and dispatching inline",
+                len(st._pending_queue),
+            )
+            # Snapshot and clear for inline dispatch
+            tasks_snapshot = list(st._pending_queue)
+            st._pending_queue.clear()
+
+        thread_id = st._thread_id_counter + 1  # Monotonically increasing unique ID
+        # Set _thread_id BEFORE starting the thread so the new thread sees
+        # its own ID on the first loop iteration (not the stale value from
+        # force_reset). If we set it after start(), the thread could check
+        # _thread_id before we update it and exit immediately.
+        st._thread_id = thread_id
+        st._thread_id_counter = thread_id
+        st._dispatcher_running = True
+        st._dispatcher_thread = threading.Thread(
             target=_dispatcher_loop,
+            args=(thread_id,),
             daemon=True,
             name="subagent-router-dispatcher",
         )
-        _dispatcher_thread.start()
-        logger.debug("Started subagent router dispatcher thread")
+        st._dispatcher_thread.start()
+        logger.debug("Started subagent router dispatcher thread (id=%s)", thread_id)
+
+    # If we had pending tasks, dispatch them inline immediately
+    # (in a separate thread so we don't block the caller)
+    if tasks_snapshot:
+        threading.Thread(
+            target=_dispatch_queued_unlocked,
+            args=(tasks_snapshot,),
+            daemon=True,
+            name="subagent-router-restart-dispatch",
+        ).start()
 
 
-def _dispatcher_loop() -> None:
+def _dispatcher_loop(my_thread_id: int) -> None:
     """Background dispatcher loop.
 
     Polls the queue at regular intervals and dispatches tasks when providers
     become available.
-    """
-    poll_interval = _get_poll_interval()
 
-    while _dispatcher_running:
+    Guards against racing with _try_dispatch_queued (called from
+    release_provider) by checking the _dispatching flag before snapshotting.
+
+    Self-identification: The loop checks _thread_id on each iteration. If
+    another thread has replaced us (new _thread_id != my_thread_id), we exit
+    gracefully instead of continuing as a stale dispatcher.
+    """
+    while True:
+        st = _state()
+
+        # Self-identification check: if someone replaced us, exit cleanly.
+        if st._thread_id != my_thread_id:
+            logger.debug(
+                "Dispatcher loop exiting (replaced: my_id=%s, current_id=%s)",
+                my_thread_id, st._thread_id,
+            )
+            break
+
+        if not st._dispatcher_running:
+            break
+
+        poll_interval = _get_poll_interval()
+        tasks_snapshot: list[dict] = []  # Declared inside try to avoid stale state
+
         try:
-            with _state_lock:
-                if not _pending_queue:
-                    # No pending tasks — check if we should stop
-                    # Keep running as long as _dispatcher_running is True
-                    pass
+            with st._lock:
+                if st._pending_queue and not st._dispatching:
+                    # Snapshot and clear the queue for dispatch.
+                    # Check _dispatching to avoid racing with _try_dispatch_queued
+                    # (called from release_provider). If another thread is already
+                    # dispatching, skip this poll cycle — it will pick up remaining
+                    # tasks on the next iteration.
+                    st._dispatching = True
+                    tasks_snapshot = list(st._pending_queue)
+                    st._pending_queue.clear()
                 else:
-                    # Try to dispatch
-                    tasks_snapshot = list(_pending_queue)
-                    _pending_queue.clear()
+                    tasks_snapshot = []  # Reset when queue is empty or dispatching
 
             if tasks_snapshot:
-                _dispatch_queued_unlocked(tasks_snapshot)
+                try:
+                    _dispatch_queued_unlocked(tasks_snapshot)
+                finally:
+                    with st._lock:
+                        st._dispatching = False
 
         except Exception as exc:
             logger.error("Dispatcher loop error: %s", exc)
+            # Ensure _dispatching is cleared on any exception
+            with st._lock:
+                st._dispatching = False
 
         time.sleep(poll_interval)
 
@@ -660,27 +926,36 @@ def stop_dispatcher() -> None:
     """Stop the dispatcher thread.
 
     Called during shutdown or when subagent_routing is disabled.
+    Waits for the thread to actually exit (up to 5s) to prevent stale
+    daemon threads from racing with newly started dispatchers.
     """
-    global _dispatcher_running
-    _dispatcher_running = False
+    st = _state()
+    st._dispatcher_running = False
+    st._thread_id = 0
+    # Wait for the thread to actually exit to prevent stale daemon threads
+    # from racing with newly started dispatchers (e.g. after force_reset).
+    if st._dispatcher_thread is not None:
+        st._dispatcher_thread.join(timeout=5)
 
 
 def reset_state() -> None:
     """Reset all routing state.
 
     Useful for testing or when subagent_routing config changes.
+
+    SAFETY: Does NOT stop the dispatcher — it will re-read fresh config
+    on its next poll cycle. Clears active_counts and pending queue.
     """
-    global _active_counts, _pending_queue, _queue_config
-    with _state_lock:
-        _active_counts.clear()
-        _pending_queue.clear()
-    _queue_config = {}
-    stop_dispatcher()
+    st = _state()
+    with st._lock:
+        st._active_counts.clear()
+        st._pending_queue.clear()
 
 
 # ---------------------------------------------------------------------------
 # Status reporting
 # ---------------------------------------------------------------------------
+
 
 def get_status() -> dict:
     """Return current routing status for monitoring/debugging.
@@ -693,11 +968,12 @@ def get_status() -> dict:
       - dispatcher_running: bool
       - priority_order: list of {name, enabled, max_concurrent, active_count}
     """
+    st = _state()
     priority_order = _get_priority_order()
     active = get_active_counts()
 
-    with _state_lock:
-        queue_size = len(_pending_queue)
+    with st._lock:
+        queue_size = len(st._pending_queue)
 
     provider_status = []
     for entry in priority_order:
@@ -715,7 +991,7 @@ def get_status() -> dict:
         "queue_size": queue_size,
         "queue_max": _get_queue_max_size(),
         "queue_enabled": _is_queue_enabled(),
-        "dispatcher_running": _dispatcher_running,
+        "dispatcher_running": st._dispatcher_running,
         "priority_order": provider_status,
         "goal_rules": _get_goal_rules(),
     }

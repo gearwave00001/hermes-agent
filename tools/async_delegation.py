@@ -620,6 +620,7 @@ def _push_completion_event(
         "toolsets": record.get("toolsets"),
         "role": record.get("role"),
         "model": result.get("model") or record.get("model"),
+        "provider": result.get("provider") or record.get("provider"),
         "status": status,
         "summary": summary,
         "error": error,
@@ -634,6 +635,11 @@ def _push_completion_event(
     _persist_completion(evt, result)
     try:
         process_registry.completion_queue.put(evt)
+        logger.info(
+            "Async delegation %s: completion event enqueued on completion_queue "
+            "(status=%s, session_key=%s)",
+            record.get("delegation_id"), status, record.get("session_key", ""),
+        )
     except Exception as exc:  # pragma: no cover
         logger.error(
             "Async delegation %s: failed to enqueue completion event; "
