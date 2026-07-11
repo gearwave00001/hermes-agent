@@ -164,6 +164,31 @@ def _get_health_check_timeout() -> float:
     return float(cfg.get("health_check_timeout", 3))
 
 
+def _get_main_server() -> str:
+    """Return the main_server name from config (empty string if not set)."""
+    cfg = _load_subagent_routing_config()
+    return cfg.get("main_server", "")
+
+
+def _should_exclude_from_subagents() -> bool:
+    """Return True if the main_server should be excluded from subagent routing."""
+    cfg = _load_subagent_routing_config()
+    return bool(cfg.get("exclude_from_subagents", False))
+
+
+def _is_excluded_provider(name: str) -> bool:
+    """Return True if this provider should be excluded from subagent routing.
+
+    When main_server is set and exclude_from_subagents is True, that provider
+    is skipped during subagent acquisition so it stays available for the
+    parent agent's own API calls.
+    """
+    if not _should_exclude_from_subagents():
+        return False
+    main = _get_main_server()
+    return bool(main and name == main)
+
+
 def _get_queue_config() -> dict:
     """Return the queue config block.
 
@@ -316,36 +341,42 @@ def acquire_provider(
 
     # Path 1: explicit override
     if provider_override:
-        creds = _resolve_provider_credentials(provider_override)
-        if creds:
-            with st._lock:
-                st._active_counts[provider_override] = (
-                    st._active_counts.get(provider_override, 0) + 1
+        if _is_excluded_provider(provider_override):
+            logger.debug("Provider '%s' excluded (main_server) — skipping override", provider_override)
+        else:
+            creds = _resolve_provider_credentials(provider_override)
+            if creds:
+                with st._lock:
+                    st._active_counts[provider_override] = (
+                        st._active_counts.get(provider_override, 0) + 1
+                    )
+                logger.debug(
+                    "Acquired provider '%s' (explicit override), "
+                    "active_count=%d",
+                    provider_override,
+                    st._active_counts[provider_override],
                 )
-            logger.debug(
-                "Acquired provider '%s' (explicit override), "
-                "active_count=%d",
-                provider_override,
-                st._active_counts[provider_override],
-            )
-            return creds
+                return creds
 
     # Path 2: goal-based rule matching
     rule_provider = _match_goal_rule(goal or "")
     if rule_provider:
-        creds = _resolve_provider_credentials(rule_provider)
-        if creds:
-            with st._lock:
-                st._active_counts[rule_provider] = (
-                    st._active_counts.get(rule_provider, 0) + 1
+        if _is_excluded_provider(rule_provider):
+            logger.debug("Provider '%s' excluded (main_server) — skipping goal rule", rule_provider)
+        else:
+            creds = _resolve_provider_credentials(rule_provider)
+            if creds:
+                with st._lock:
+                    st._active_counts[rule_provider] = (
+                        st._active_counts.get(rule_provider, 0) + 1
+                    )
+                logger.debug(
+                    "Acquired provider '%s' (goal rule match), "
+                    "active_count=%d",
+                    rule_provider,
+                    st._active_counts[rule_provider],
                 )
-            logger.debug(
-                "Acquired provider '%s' (goal rule match), "
-                "active_count=%d",
-                rule_provider,
-                st._active_counts[rule_provider],
-            )
-            return creds
+                return creds
 
     # Path 3: priority_order routing - pick server with most remaining capacity.
     # Instead of "first in list that has room" (which can stack subagents on a
@@ -368,6 +399,9 @@ def acquire_provider(
         if not name:
             continue
         if not entry.get("enabled", True):
+            continue
+        if _is_excluded_provider(name):
+            logger.debug("Provider '%s' excluded (main_server) — skipping", name)
             continue
         max_conc = entry.get("max_concurrent")
         if max_conc is None:
@@ -983,10 +1017,13 @@ def get_status() -> dict:
             "enabled": entry.get("enabled", True),
             "max_concurrent": entry.get("max_concurrent"),
             "active_count": active.get(name, 0),
+            "excluded": _is_excluded_provider(name),
         })
 
     return {
         "enabled": _is_enabled(),
+        "main_server": _get_main_server(),
+        "exclude_from_subagents": _should_exclude_from_subagents(),
         "active_counts": active,
         "queue_size": queue_size,
         "queue_max": _get_queue_max_size(),
