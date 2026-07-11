@@ -25,12 +25,11 @@ from tools.subagent_router import (
     release_provider,
     reset_state,
     stop_dispatcher,
-    _active_counts,
     _is_enabled,
     _load_subagent_routing_config,
     _match_goal_rule,
-    _pending_queue,
     _resolve_provider_credentials,
+    _state,
 )
 
 
@@ -80,10 +79,10 @@ class TestSubagentRouterState(unittest.TestCase):
                 self.assertEqual(counts.get("test-server"), 0)
 
     def test_reset_clears_state(self):
-        _active_counts["some-provider"] = 5
+        _state()._active_counts["some-provider"] = 5
         reset_state()
         self.assertEqual(get_active_counts(), {})
-        self.assertEqual(len(_pending_queue), 0)
+        self.assertEqual(len(_state()._pending_queue), 0)
 
     def test_status_report(self):
         status = get_status()
@@ -246,7 +245,7 @@ class TestAcquireProvider(unittest.TestCase):
                 ],
             ):
                 # Pre-fill the first server to capacity
-                _active_counts["full-server"] = 1
+                _state()._active_counts["full-server"] = 1
 
                 with patch(
                     "tools.subagent_router._resolve_provider_credentials",
@@ -341,7 +340,7 @@ class TestAcquireProvider(unittest.TestCase):
                     {"name": "server-a", "enabled": True, "max_concurrent": 1},
                 ],
             ):
-                _active_counts["server-a"] = 1
+                _state()._active_counts["server-a"] = 1
                 creds = acquire_provider()
                 self.assertIsNone(creds)
 
@@ -403,7 +402,7 @@ class TestQueue(unittest.TestCase):
                         delegation_cfg={"max_iterations": 50},
                     )
                     self.assertTrue(result)
-                    self.assertEqual(len(_pending_queue), 1)
+                    self.assertEqual(len(_state()._pending_queue), 1)
 
     def test_enqueue_returns_false_when_full(self):
         with patch("tools.subagent_router._is_queue_enabled", return_value=True):
@@ -451,7 +450,7 @@ class TestQueue(unittest.TestCase):
                         parent_agent=parent_agent,
                         delegation_cfg={"max_iterations": 100},
                     )
-            result = _pending_queue[0]
+            result = _state()._pending_queue[0]
             self.assertIsNotNone(result)
             self.assertEqual(result["task"]["goal"], "test task")
             self.assertEqual(result["session_key"], "my-session")
@@ -511,13 +510,13 @@ class TestMidQueueHealthCheck(unittest.TestCase):
                         # First acquire: server-a has capacity → acquires it
                         creds1 = acquire_provider()
                         self.assertIsNotNone(creds1)
-                        self.assertEqual(_active_counts.get("server-a"), 1)
+                        self.assertEqual(_state()._active_counts.get("server-a"), 1)
 
                         # Second acquire: server-a is at capacity (count=1 >= max_conc=1)
                         # so router tries server-b next → acquires it
                         creds2 = acquire_provider()
                         self.assertIsNotNone(creds2)
-                        self.assertEqual(_active_counts.get("server-b"), 1)
+                        self.assertEqual(_state()._active_counts.get("server-b"), 1)
 
     def test_health_check_failure_skips_to_next_in_priority(self):
         """When top-priority server fails health check, router skips to next."""
@@ -564,8 +563,8 @@ class TestMidQueueHealthCheck(unittest.TestCase):
                         creds = acquire_provider()
                         self.assertIsNotNone(creds)
                         # Should have skipped bad-server and acquired good-server
-                        self.assertEqual(_active_counts.get("good-server"), 1)
-                        self.assertNotIn("bad-server", _active_counts)
+                        self.assertEqual(_state()._active_counts.get("good-server"), 1)
+                        self.assertNotIn("bad-server", _state()._active_counts)
 
 
 class TestGoalRuleCapacity(unittest.TestCase):
@@ -600,7 +599,7 @@ class TestGoalRuleCapacity(unittest.TestCase):
                     ],
                 ):
                     # Pre-fill server-a to capacity
-                    _active_counts["server-a"] = 1
+                    _state()._active_counts["server-a"] = 1
 
                     with patch(
                         "tools.subagent_router._resolve_provider_credentials",
@@ -617,7 +616,7 @@ class TestGoalRuleCapacity(unittest.TestCase):
                             creds = acquire_provider(goal="do a code review")
                             # Goal rule matches server-a → acquires it directly (count=2)
                             self.assertIsNotNone(creds)
-                            self.assertEqual(_active_counts.get("server-a"), 2)
+                            self.assertEqual(_state()._active_counts.get("server-a"), 2)
 
     def test_goal_rule_still_acquires_when_capacity_available(self):
         """Goal rule points to server-a and it has capacity — acquires directly."""
@@ -649,7 +648,7 @@ class TestGoalRuleCapacity(unittest.TestCase):
                         ):
                             creds = acquire_provider(goal="do a code review")
                             self.assertIsNotNone(creds)
-                            self.assertEqual(_active_counts.get("server-a"), 1)
+                            self.assertEqual(_state()._active_counts.get("server-a"), 1)
 
 
 class TestQueueDispatch(unittest.TestCase):
@@ -663,7 +662,7 @@ class TestQueueDispatch(unittest.TestCase):
 
     def test_release_triggers_queue_dispatch(self):
         """When release_provider() fires, queued tasks get dispatched via acquire loop.
-        
+
         Key insight: _try_dispatch_queued() clears the queue immediately and spawns
         a background thread. We patch _ensure_dispatcher to prevent it from spawning
         a dispatcher during enqueue (which would steal items), then verify dispatch
@@ -690,9 +689,9 @@ class TestQueueDispatch(unittest.TestCase):
                         "tools.subagent_router._health_check", return_value=True
                     ):
                         # Fill server-a to capacity
-                        _active_counts["server-a"] = 1
+                        _state()._active_counts["server-a"] = 1
 
-                        # Enqueue two tasks — patch _ensure_dispatcher so the
+                        # Enqueue two tasks -- patch _ensure_dispatcher so the
                         # background dispatcher doesn't steal items between enqueues
                         with patch("tools.subagent_router._ensure_dispatcher"):
                             enqueue_task(
@@ -710,26 +709,41 @@ class TestQueueDispatch(unittest.TestCase):
                                 delegation_cfg={},
                             )
 
-                        self.assertEqual(len(_pending_queue), 2)
+                        self.assertEqual(len(_state()._pending_queue), 2)
+
+                        # Make the dispatcher appear alive so release_provider
+                        # takes the normal _try_dispatch_queued path (not inline)
+                        st = _state()
+                        st._dispatcher_running = True
+                        st._dispatcher_thread = threading.Thread(
+                            target=lambda: None, daemon=True
+                        )
+                        st._dispatcher_thread.start()
 
                         # Record active counts before release
-                        before_counts = dict(_active_counts)
+                        before_counts = dict(_state()._active_counts)
 
-                        # Release server-a — should trigger dispatch of queued tasks
-                        release_provider("server-a")
+                        # Patch _dispatch_single_queued so the background thread
+                        # doesn't try to build real child agents (which would fail
+                        # without the full delegate_tool chain). The acquire loop
+                        # in _dispatch_queued_unlocked still runs, so we can verify
+                        # that providers are acquired for queued tasks.
+                        with patch("tools.subagent_router._dispatch_single_queued"):
+                            # Release server-a -- should trigger dispatch of queued tasks
+                            release_provider("server-a")
 
-                        # _try_dispatch_queued() clears the queue immediately and
-                        # spawns a background thread. Wait for it to complete.
-                        time.sleep(0.5)
+                            # _try_dispatch_queued() clears the queue immediately and
+                            # spawns a background thread. Wait for it to complete.
+                            time.sleep(0.5)
 
-                        # Queue should be empty (dispatched or re-queued)
-                        self.assertEqual(len(_pending_queue), 0)
+                            # Queue should be empty (dispatched or re-queued)
+                            self.assertEqual(len(_state()._pending_queue), 0)
 
-                        # Active counts should have increased (tasks were acquired)
-                        after_counts = dict(_active_counts)
-                        total_before = sum(before_counts.values())
-                        total_after = sum(after_counts.values())
-                        self.assertGreaterEqual(total_after, total_before)
+                            # Active counts should have increased (tasks were acquired)
+                            after_counts = dict(_state()._active_counts)
+                            total_before = sum(before_counts.values())
+                            total_after = sum(after_counts.values())
+                            self.assertGreaterEqual(total_after, total_before)
 
     def test_sync_event_blocks_parent_until_queue_empty(self):
         """Parent with sync_event blocks until all queued tasks complete."""
@@ -804,7 +818,7 @@ class TestQueueCapacityModes(unittest.TestCase):
                         "tools.subagent_router._health_check", return_value=True
                     ):
                         # Fill server-a to capacity
-                        _active_counts["server-a"] = 1
+                        _state()._active_counts["server-a"] = 1
 
                         # Server at capacity → acquire_provider returns None
                         creds = acquire_provider()
@@ -858,8 +872,8 @@ class TestDisabledServerUnderLoad(unittest.TestCase):
                 ],
             ):
                 # Pre-fill both enabled servers to capacity
-                _active_counts["server-a"] = 1
-                _active_counts["server-b"] = 1
+                _state()._active_counts["server-a"] = 1
+                _state()._active_counts["server-b"] = 1
 
                 with patch(
                     "tools.subagent_router._resolve_provider_credentials",
@@ -883,7 +897,7 @@ class TestDisabledServerUnderLoad(unittest.TestCase):
                         # Now should route to server-a
                         creds = acquire_provider()
                         self.assertIsNotNone(creds)
-                        self.assertEqual(_active_counts.get("server-a"), 1)
+                        self.assertEqual(_state()._active_counts.get("server-a"), 1)
 
 
 class TestIdempotentRelease(unittest.TestCase):
@@ -898,24 +912,24 @@ class TestIdempotentRelease(unittest.TestCase):
     def test_release_idempotent_at_zero(self):
         """release_provider at count=0 is idempotent — no crash, no negative count.
         
-        Note: _active_counts.get("never-acquired") returns None (key not in dict),
+        Note: _state()._active_counts.get("never-acquired") returns None (key not in dict),
         not 0. Both are equivalent for our purposes — the server has zero active
         connections whether the key exists with value 0 or doesn't exist at all.
         """
         # Release a server that was never acquired (count = 0, key may or may not exist)
         release_provider("never-acquired")
-        count = _active_counts.get("never-acquired", 0)
+        count = _state()._active_counts.get("never-acquired", 0)
         self.assertEqual(count, 0)
 
         # Release again — should still be 0
         release_provider("never-acquired")
-        count = _active_counts.get("never-acquired", 0)
+        count = _state()._active_counts.get("never-acquired", 0)
         self.assertEqual(count, 0)
 
         # Release multiple times in a row
         for _ in range(5):
             release_provider("never-acquired")
-        count = _active_counts.get("never-acquired", 0)
+        count = _state()._active_counts.get("never-acquired", 0)
         self.assertEqual(count, 0)
 
 
@@ -958,7 +972,75 @@ class TestResolutionFailureCascade(unittest.TestCase):
                         creds = acquire_provider()
                         # Should have skipped server-a (None) and acquired server-b
                         self.assertIsNotNone(creds)
-                        self.assertEqual(_active_counts.get("server-b"), 1)
+                        self.assertEqual(_state()._active_counts.get("server-b"), 1)
+
+
+class TestReimportSurvival(unittest.TestCase):
+    """State survives module reimport (config reload, model switch, etc.)."""
+
+    def setUp(self):
+        import tools.subagent_router as _mod
+        _mod._RouterState.force_reset()
+
+    def tearDown(self):
+        import tools.subagent_router as _mod
+        _mod._RouterState.force_reset()
+
+    def test_state_survives_class_reset(self):
+        """Singleton state survives when class._instance is cleared (simulates reimport).
+
+        On module reimport, class-level _instance resets to None, but the
+        actual state object lives in sys.modules and is recovered by _state().
+        """
+        import tools.subagent_router as _mod
+
+        # Set up some state
+        st = _mod._state()
+        original_id = id(st)
+        st._active_counts["server-a"] = 3
+        st._pending_queue.append({"task": {"goal": "test"}})
+        st._dispatcher_running = True
+
+        # Simulate reimport: clear class-level _instance (module-level vars reset)
+        _mod._RouterState._instance = None
+
+        # _state() should recover from sys.modules
+        st_after = _mod._state()
+        self.assertEqual(id(st_after), original_id)
+        self.assertEqual(st_after._active_counts.get("server-a"), 3)
+        self.assertEqual(len(st_after._pending_queue), 1)
+        self.assertEqual(st_after._dispatcher_running, True)
+
+    def test_release_provider_dispatches_when_dispatcher_dead(self):
+        """release_provider detects dead dispatcher and dispatches inline."""
+        import tools.subagent_router as _mod
+
+        # Set up: active count for a server, and a pending task
+        st = _mod._state()
+        st._active_counts["server-a"] = 1
+        st._dispatcher_running = False  # Simulate dead dispatcher
+
+        # Enqueue a task
+        with patch("tools.subagent_router._is_queue_enabled", return_value=True):
+            with patch("tools.subagent_router._get_queue_max_size", return_value=20):
+                with patch("tools.subagent_router._ensure_dispatcher"):
+                    _mod.enqueue_task(
+                        task={"goal": "queued task"},
+                        session_key="test",
+                        sync_event=None,
+                        parent_agent=MagicMock(),
+                        delegation_cfg={},
+                    )
+
+        self.assertEqual(len(st._pending_queue), 1)
+
+        # Release should detect dead dispatcher and dispatch inline
+        # (we can't fully test inline dispatch without mocking the whole chain,
+        # but we can verify the queue was cleared)
+        with patch("tools.subagent_router._dispatch_queued_unlocked") as mock_dispatch:
+            _mod.release_provider("server-a")
+            # Should have called inline dispatch since dispatcher is dead
+            mock_dispatch.assert_called_once()
 
 
 if __name__ == "__main__":

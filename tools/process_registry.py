@@ -1201,6 +1201,8 @@ class ProcessRegistry:
         """
         results: "list[tuple[dict, str]]" = []
         requeue: "list[dict]" = []
+        skipped = 0
+        formatted_none = 0
         while not self.completion_queue.empty():
             try:
                 evt = self.completion_queue.get_nowait()
@@ -1237,6 +1239,8 @@ class ProcessRegistry:
             # Local consumed/observed state may suppress only events this
             # session owns (or legacy ownerless ordinary events). Routing must
             # happen first so a foreign session cannot drop the owner's event.
+            _evt_type = evt.get("type", "completion")
+            _deleg_id = evt.get("delegation_id", "")
             _evt_sid = evt.get("session_id", "")
             if evt.get("type") == "completion" and self._drain_should_skip(
                 _evt_sid, skip_poll_observed=skip_poll_observed
@@ -1246,8 +1250,28 @@ class ProcessRegistry:
             text = format_process_notification(evt)
             if text:
                 results.append((evt, text))
+                logger.debug(
+                    "drain_notifications: formatted %s event (deleg_id=%s, session_key=%s)",
+                    _evt_type, _deleg_id, evt.get("session_key", ""),
+                )
+            else:
+                formatted_none += 1
+                logger.warning(
+                    "drain_notifications: format_process_notification returned None "
+                    "for %s event (deleg_id=%s, session_key=%s) — event will be dropped",
+                    _evt_type, _deleg_id, evt.get("session_key", ""),
+                )
+
         for evt in requeue:
             self.completion_queue.put(evt)
+
+        if results or skipped or formatted_none:
+            logger.info(
+                "drain_notifications: drained %d events "
+                "(%d formatted, %d skipped, %d dropped)",
+                len(results) + skipped + formatted_none,
+                len(results), skipped, formatted_none,
+            )
         return results
 
     def get(self, session_id: str) -> Optional[ProcessSession]:
@@ -2049,6 +2073,7 @@ def _format_async_delegation(evt: dict) -> str:
     toolsets = evt.get("toolsets")
     role = evt.get("role") or "leaf"
     model = evt.get("model") or "?"
+    provider = evt.get("provider")
     status = evt.get("status") or "completed"
     summary = evt.get("summary")
     error = evt.get("error")
@@ -2056,6 +2081,13 @@ def _format_async_delegation(evt: dict) -> str:
     duration = evt.get("duration_seconds", "?")
     dispatched_at = evt.get("dispatched_at")
     completed_at = evt.get("completed_at") or _time.time()
+
+    # Helper: build a "Provider/IP" label from the provider field.
+    # For custom providers this is the base_url hostname (e.g. 192.168.1.224).
+    def _provider_label(p):
+        if not p or p in ("?", None, ""):
+            return ""
+        return f"   Provider: {p}"
 
     # ----- Batch (fan-out) completion: consolidated multi-task block -----
     # A whole delegate_task fan-out dispatched as one background unit finishes
@@ -2083,7 +2115,29 @@ def _format_async_delegation(evt: dict) -> str:
             lines.append(f"Context you provided: {context}")
         if toolsets:
             lines.append(f"Toolsets: {', '.join(toolsets)}")
-        lines.append(f"Role: {role}   Model: {model}   Total duration: {total_dur}s")
+        batch_header = f"Role: {role}   Model: {model}   Total duration: {total_dur}s"
+        lines.append(batch_header)
+        # End-of-run summary table: list each subagent with its server IP/provider
+        if results:
+            lines.append("")
+            lines.append("Subagent routing summary:")
+            lines.append(f"{'#':>2}  {'Topic':<45}  {'Server/IP':<18}  {'Model':<35}  {'Status'}")
+            lines.append("-" * 120)
+            for r in sorted(results, key=lambda x: x.get("task_index", 0)):
+                idx = r.get("task_index", 0)
+                r_goal = goals[idx] if idx < len(goals) else r.get("goal", "")
+                # Truncate long goal strings to fit the column
+                topic = r_goal[:43] + ".." if len(r_goal) > 45 else r_goal
+                r_provider = r.get("provider", "?") or "?"
+                r_model = r.get("model", "?") or "?"
+                model_short = r_model.split("/")[-1] if "/" in str(r_model) else r_model
+                # Truncate model name to fit column
+                if len(model_short) > 33:
+                    model_short = model_short[:30] + "..."
+                r_status = r.get("status", "?")
+                icon = "✓" if r_status in ("completed", "success") else "✗"
+                lines.append(f"{idx+1:>2}  {topic:<45}  {r_provider:<18}  {model_short:<35}  {icon} {r_status}")
+            lines.append("")
         if error and not results:
             lines.append("--- ERROR ---")
             lines.append(f"The batch did not complete successfully: {error}")
@@ -2099,11 +2153,14 @@ def _format_async_delegation(evt: dict) -> str:
             header = f"--- {icon} TASK {idx + 1}/{n}"
             if r_goal:
                 header += f": {r_goal}"
+            r_provider = r.get("provider")
             header += f"  (status={r_status}"
             if r.get("api_calls"):
                 header += f", api_calls={r['api_calls']}"
             if r.get("duration_seconds") is not None:
                 header += f", {r['duration_seconds']}s"
+            if r_provider:
+                header += f", provider={r_provider}"
             header += ") ---"
             lines.append(header)
             if r_status in ("completed", "success") and r_summary:
@@ -2145,7 +2202,10 @@ def _format_async_delegation(evt: dict) -> str:
         lines.append(f"Context you provided: {context}")
     if toolsets:
         lines.append(f"Toolsets: {', '.join(toolsets)}")
-    lines.append(f"Role: {role}   Model: {model}")
+    model_line = f"Role: {role}   Model: {model}"
+    if provider:
+        model_line += _provider_label(provider)
+    lines.append(model_line)
     lines.append(f"Status: {status}   API calls: {api_calls}   Duration: {duration}s")
     lines.append("--- RESULT ---")
     if status in ("completed", "success") and summary:
