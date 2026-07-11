@@ -1,7 +1,7 @@
 ---
 name: hermes-agent
 description: "Configure, extend, or contribute to Hermes Agent."
-version: 2.3.0
+version: 3.0.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -14,33 +14,7 @@ metadata:
 
 # Hermes Agent
 
-Hermes Agent is an open-source AI agent framework by Nous Research that runs in your terminal, a native desktop app, messaging platforms, and IDEs. It's in the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, Google, DeepSeek, xAI, local models, and 20+ others) and runs on Linux, macOS, Windows, and WSL.
-
-What makes Hermes different:
-
-- **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills. When it solves a complex problem, discovers a workflow, or gets corrected, it can persist that knowledge as a skill document that loads into future sessions. Skills accumulate over time, making the agent better at your specific tasks and environment.
-- **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends (built-in, Honcho, Mem0, and more) let you choose how memory works.
-- **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, iMessage, Signal, Matrix, Teams, Email, and a dozen more platforms with full tool access, not just chat.
-- **Many surfaces** — the same agent core drives the CLI, the Ink TUI, a native Electron desktop app, a web dashboard, and an ACP server for IDEs (VS Code / Zed / JetBrains).
-- **Provider-agnostic** — swap models and providers mid-workflow without changing anything else. Credential pools rotate across multiple API keys automatically.
-- **Profiles** — run multiple independent Hermes instances with isolated configs, sessions, skills, and memory.
-- **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, and the full Python ecosystem.
-
-People use Hermes for software development, research, system administration, data analysis, content creation, home automation, and anything else that benefits from an AI agent with persistent context and full system access.
-
-**This skill helps you work with Hermes Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
-
-**Docs:** https://hermes-agent.nousresearch.com/docs/
-
-## Scope & Verification
-
-This skill is a concise operating guide, not the complete source of truth for every Hermes feature. If a Hermes feature, command, or setting is not mentioned here, do not treat that absence as evidence that it does not exist. Check the live repository and official docs before giving a negative answer.
-
-Good verification targets:
-
-- CLI commands: `hermes --help`, `hermes <command> --help`, and `hermes_cli/main.py`
-- User documentation: https://hermes-agent.nousresearch.com/docs/
-- Source tree: https://github.com/NousResearch/hermes-agent
+User-specific preferences, workflows, and troubleshooting. General CLI reference, slash commands, config sections, provider/toolset tables, and contributor docs are in `AGENTS.md` — not duplicated here.
 
 ## Web Search & Fetch — open-websearch MCP server
 
@@ -66,8 +40,8 @@ The script is at `~/.local/bin/mcp_search` and connects to an open-websearch MCP
 3. Do not ask the user for permission to use web_search or web_extract. Just use mcp_search.
 
 The MCP server also exposes these tools via Hermes' native MCP client (auto-discovered on startup):
-- `mcp_open_websearch_search` — web search (DuckDuckGo, Bing) with query/limit/searchMode/engines params
-- `mcp_open_websearch_fetch_web_content` — fetch any public URL with maxChars/readability/includeLinks options
+- `mcp_open_websearch_search` — web search (DuckDuckGo, Bing)
+- `mcp_open_websearch_fetch_web_content` — fetch any public URL
 - `mcp_open_websearch_fetch_github_readme` — fetch README from a GitHub repo URL
 - `mcp_open_websearch_fetch_linux_do_article` — fetch linux.do post content
 - `mcp_open_websearch_fetch_csdn_article` — fetch csdn post content
@@ -75,7 +49,7 @@ The MCP server also exposes these tools via Hermes' native MCP client (auto-disc
 
 Use the CLI wrapper (`mcp_search`) for simplicity; use the MCP tools when you need structured JSON output or want to chain tool calls.
 
-**Docs:** https://hermes-agent.nousresearch.com/docs/
+How the built-in MCP client connects servers (stdio/HTTP), auto-discovers their tools, and exposes them as first-class tools: `skill_view(name="hermes-agent", file_path="references/native-mcp.md")`.
 
 ## Quick Start
 
@@ -557,28 +531,20 @@ Hermes: when working in this repo, follow these rules.
 
 That file at `/home/me/projects/myrepo/.hermes.md` is auto-loaded when Hermes runs in any subdirectory of `/home/me/projects/myrepo`, but not when it runs in `/home/me/other-project`.
 
-## Security & Privacy Toggles
+Webhook setup, route config, payload templating, and event-driven agent-run patterns: `skill_view(name="hermes-agent", file_path="references/webhooks.md")`.
 
-Common "why is Hermes doing X to my output / tool calls / commands?" toggles — and the exact commands to change them. Most of these need a fresh session (`/reset` in chat, or start a new `hermes` invocation) because they're read once at startup.
+## Security & Privacy Toggles
 
 ### Secret redaction in tool output
 
-Secret redaction is **on by default** — tool output (terminal stdout, `read_file`, web content, subagent summaries, etc.) is scanned for strings that look like API keys, tokens, and secrets before it enters the conversation context and logs. Leave it enabled for normal use:
+Secret redaction is **on by default**. `security.redact_secrets` is snapshotted at import time — toggling it mid-session via `export HERMES_REDACT_SECRETS=false` will NOT take effect for the running process. Tell the user to change it in config from a terminal, then start a new session.
 
 ```bash
-hermes config set security.redact_secrets true       # keep enabled globally
-```
-
-**Restart required.** `security.redact_secrets` is snapshotted at import time — toggling it mid-session (e.g. via `export HERMES_REDACT_SECRETS=false` from a tool call) will NOT take effect for the running process. Tell the user to change it in config from a terminal, then start a new session. This is deliberate — it prevents an LLM from flipping the toggle on itself mid-task.
-
-Disable only when you deliberately need raw credential-like strings for debugging or redactor development:
-```bash
-hermes config set security.redact_secrets false
+hermes config set security.redact_secrets true    # keep enabled
+hermes config set security.redact_secrets false   # disable (debugging only)
 ```
 
 ### PII redaction in gateway messages
-
-Separate from secret redaction. When enabled, the gateway hashes user IDs and strips phone numbers from the session context before it reaches the model:
 
 ```bash
 hermes config set privacy.redact_pii true    # enable
@@ -594,31 +560,23 @@ By default (`approvals.mode: smart`), Hermes asks an auxiliary LLM to assess she
 - `off` — skip all approval prompts (equivalent to `--yolo`)
 
 ```bash
-hermes config set approvals.mode smart       # recommended middle ground
-hermes config set approvals.mode off         # bypass everything (not recommended)
+hermes config set approvals.mode smart       # recommended
+hermes config set approvals.mode off         # bypass everything
 ```
 
-Per-invocation bypass without changing config:
-- `hermes --yolo …`
-- `export HERMES_YOLO_MODE=1`
-
-Note: YOLO / `approvals.mode: off` does NOT turn off secret redaction. They are independent.
+Per-invocation: `hermes --yolo` or `export HERMES_YOLO_MODE=1`. YOLO does NOT turn off secret redaction.
 
 ### Shell hooks allowlist
 
-Some shell-hook integrations require explicit allowlisting before they fire. Managed via `~/.hermes/shell-hooks-allowlist.json` — prompted interactively the first time a hook wants to run.
+Managed via `~/.hermes/shell-hooks-allowlist.json` — prompted interactively the first time a hook wants to run.
 
-### Disabling the web/browser/image-gen tools
+### Disabling web/browser/image-gen tools
 
-To keep the model away from network or media tools entirely, open `hermes tools` and toggle per-platform. Takes effect on next session (`/reset`). See the Tools & Skills section above.
-
----
+Open `hermes tools` and toggle per-platform. Takes effect on next session (`/reset`).
 
 ## Voice & Transcription
 
 ### STT (Voice → Text)
-
-Voice messages from messaging platforms are auto-transcribed.
 
 Provider priority (auto-detected):
 1. **Local faster-whisper** — free, no API key: `pip install faster-whisper`
@@ -626,7 +584,6 @@ Provider priority (auto-detected):
 3. **OpenAI Whisper** — paid: set `VOICE_TOOLS_OPENAI_KEY`
 4. **Mistral Voxtral** — set `MISTRAL_API_KEY`
 
-Config:
 ```yaml
 stt:
   enabled: true
@@ -648,13 +605,9 @@ stt:
 
 Voice commands: `/voice on` (voice-to-voice), `/voice tts` (always voice), `/voice off`.
 
----
-
 ## Spawning Additional Hermes Instances
 
 Run additional Hermes processes as fully independent subprocesses — separate sessions, tools, and environments.
-
-### When to Use This vs delegate_task
 
 | | `delegate_task` | Spawning `hermes` process |
 |-|-----------------|--------------------------|
@@ -710,16 +663,6 @@ terminal(command="tmux capture-pane -t backend -p | tail -30", timeout=5)
 terminal(command="tmux send-keys -t frontend 'Here is the API schema from the backend agent: ...' Enter", timeout=5)
 ```
 
-### Session Resume
-
-```
-# Resume most recent session
-terminal(command="tmux new-session -d -s resumed 'hermes --continue'", timeout=10)
-
-# Resume specific session
-terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_143052_a1b2c3'", timeout=10)
-```
-
 ### Tips
 
 - **Prefer `delegate_task` for quick subtasks** — less overhead than spawning a full process
@@ -729,49 +672,13 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Use tmux for interactive sessions** — raw PTY mode has `\r` vs `\n` issues with prompt_toolkit
 - **For scheduled tasks**, use the `cronjob` tool instead of spawning — handles delivery and retry
 
----
+## GPU Server Routing for Subagents
 
-## Durable & Background Systems
+When running behind a single-request-per-connection llama.cpp server (or any inference backend), subagents route to **separate HTTP connections** on other servers — they do NOT share the parent's inference slot.
 
-Four systems run alongside the main conversation loop. Quick reference
-here; full developer notes live in `AGENTS.md`, user-facing docs under
-`website/docs/user-guide/features/`.
+**Key pattern:** Configure all servers under `custom_providers` in `config.yaml`. The main conversation uses `model.base_url` (the primary); subagents pick from `custom_providers` based on the `model` field passed to `delegate_task`.
 
-### Delegation (`delegate_task`)
-
-Spawn a subagent with an isolated context + terminal session.
-
-- **Single:** `delegate_task(goal, context)`.
-- **Batch:** `delegate_task(tasks=[{goal, ...}, ...])` runs children in
-  parallel, capped by `delegation.max_concurrent_children` (default 3).
-- **Background:** `delegate_task(background=true)` returns a handle
-  immediately and keeps the parent loop going; the child's result
-  re-enters the conversation as a new turn when it finishes.
-- **Roles:** `leaf` (default; cannot re-delegate) vs `orchestrator`
-  (can spawn its own workers, bounded by `delegation.max_spawn_depth`).
-- **Not durable.** A backgrounded child is still process-local — if the
-  parent process exits, the child is lost. For work that must outlive
-  the process, use `cronjob` or
-  `terminal(background=True, notify_on_complete=True)`.
-
-Config: `delegation.*` in `config.yaml`.
-
-#### GPU Server Routing for Subagents
-
-When running behind a single-request-per-connection llama.cpp server (or any
-inference backend), subagents route to **separate HTTP connections** on other
-servers — they do NOT share the parent's inference slot.
-
-**Key pattern:** Configure all servers under `custom_providers` in
-`config.yaml`. The main conversation uses `model.base_url` (the primary);
-subagents pick from `custom_providers` based on the `model` field passed to
-`delegate_task`.
-
-**CRITICAL PITFALL — empty delegation.provider:** When `delegation.provider`
-is empty (`''`) in config.yaml, subagents **inherit from parent** instead of
-routing to the configured server. Even if the server is defined in 
-`subagent_routing.priority_order`, an empty `delegation.provider` means the subagent 
-stays on the parent's server (225).
+**CRITICAL PITFALL — empty delegation.provider:** When `delegation.provider` is empty (`''`) in config.yaml, subagents **inherit from parent** instead of routing to the configured server. Even if the server is defined in `custom_providers` and first in `subagent_routing.priority_order`, an empty `delegation.provider` means the subagent stays on the parent's server (225).
 
 **Fix:** Set both fields explicitly:
 ```bash
@@ -779,39 +686,14 @@ hermes config set delegation.provider "192.168.1.224"
 hermes config set delegation.model "Qwen3.6-27B-FP8"
 ```
 
-**Important distinction:** `delegation.provider` is the DEFAULT, not the
-destination. When `subagent_routing.enabled: false`, `delegate_task` reads
-`delegation.provider` directly — all subagents go to one server. When
-`subagent_routing.enabled: true`, each child calls `acquire_provider()`
-independently, walking `priority_order` top-to-bottom — so different subagents
-can be distributed across different servers even though `delegation.provider`
-points to a single value. Always set `delegation.provider` explicitly when you
-want subagents to route away from parent in the legacy single-provider mode.
+**Important distinction:** The `subagent_routing.priority_order` block defines a priority chain (224 → 222 → 223 → 221), but `delegate_task` reads from `delegation.provider` directly — not from `priority_order`. So even if 224 is first in priority_order, subagents won't go there if `delegation.provider` is empty. Always set `delegation.provider` to the desired server name when you want subagents to route away from parent.
 
-**CRITICAL PITFALL — max_concurrent_children cap blocks batch dispatch:** When dispatching multiple subagents via `delegate_task(tasks=[...])`, the parent's own `max_concurrent_children` limit (default: 3) is checked BEFORE tasks reach the queue layer. If you pass more tasks than this cap, excess tasks are rejected with "Too many tasks" — they never even enter the overflow queue.
-
-**Why it happens:** The config file may show `max_concurrent_children: 10`, but`_get_max_concurrent_children()` reads from `CLI_CONFIG.get("delegation")`. If that returns an empty dict (e.g., stale config or wrong path), the function falls back to the hardcoded default of **3**.
-
-**Fix:** Always verify `max_concurrent_children` is read correctly before batch dispatching. Set it explicitly if needed:
-```bash
-hermes config set delegation.max_concurrent_children 10
-```
-
-When dispatching N subagents in batch mode, ensure `N <= max_concurrent_children`.If you need more concurrent tasks, either:
-1. Increase `delegation.max_concurrent_children` (recommended for LAN servers)
-2. Split into multiple `delegate_task()` calls (sends 2-3 at a time)
-3. Pass tasks as individual `delegate_task(goal=..., context=...)` calls
-
-**Fallback chain:** Subagents inherit the parent's `_fallback_chain` at runtime
-(see `delegate_tool.py` line 1187). The top-level `fallback_providers: []` in
-config.yaml feeds this chain — when empty, the fallback is thin (just the parent's
-own provider). To get multi-server failover, populate either the top-level list or
-add `delegation.fallback_providers`.
+**Fallback chain:** Subagents inherit the parent's `_fallback_chain` at runtime (see `delegate_tool.py` line 1187). The top-level `fallback_providers: []` in config.yaml feeds this chain — when empty, the fallback is thin (just the parent's own provider). To get multi-server failover, populate either the top-level list or add `delegation.fallback_providers`.
 
 ```yaml
 # config.yaml — custom_providers section
 custom_providers:
-- name: 192.168.1.225        # Primary — always on, power efficient
+- name: Server_llamacpp        # Primary — always on, power efficient
   base_url: http://192.168.1.225:5678/v1/
   api_key: proxy-managed
   model: Huihui-Qwen3.6-35B-A3B-abliterated-ggml-model-Q6_K.gguf
@@ -833,254 +715,33 @@ custom_providers:
 # To set a default for all subagents: set delegation.provider to the server name
 ```
 
-**Port conventions:** The port is typically `5678` but can be overridden. The `base_url` must include the
-port even if it's the standard one.d
+**Port conventions:** All llama.cpp and vLLM deployments typically use port `5678`. The `base_url` must include the port even if it's the standard one.
 
-**Primary reservation:** The primary server (`subagent_routing.main_server` by default)
-handles the main conversation and should generally be skipped for subagents
-unless explicitly routed to. This prevents contention with the parent agent.
+**Primary reservation:** The primary server (`Server_llamacpp` by default) handles the main conversation and should generally be skipped for subagents unless explicitly routed to. This prevents contention with the parent agent.
 
-See `references/gpu-server-routing.md` for detailed routing patterns, the `subagent_routing` block, and the `fallback_providers` feature request. See `references/gpu-server-routing-edge-cases.md` for edge cases: queue-full vs at-capacity distinction, goal-rule fallback behavior, release-triggered dispatch timing, and provider resolution cascade. See `references/multi-server-delegation.md` for research notes on multi-server delegation configuration.
-
-**vLLM timeout recovery:** When a subagent's vLLM server times out mid-generation, it stays alive but loses context. Send an HTTP POST to `/v1/chat/completions` with a system message restating the topic (not raw text via socket). See `references/vllm-timeout-recovery.md`.
-
-**Batch result ordering:** In batch mode, subagent results re-enter as separate assistant messages in the session DB. Use `session_search` with `role_filter="assistant"` and anchor on message position rather than text-matching — subagent results append at the end of the stream. Scroll forward from the last known message if a result hasn't appeared yet.
-
-**Locating responses by delegation_id:** When dispatching subagents, always record the returned `delegation_id` values (from the `delegate_task` tool call output) and verify them against completion banners before attributing reports. This prevents mixing up carryover completions from earlier dispatch cycles with fresh results.
-
-**CRITICAL PITFALL — repeated mistake: **topic-matching trap.** When running `session_search` to find a completed subagent report, the most common error is grabbing the most recent-looking report that matches the topic, even if its `delegation_id` belongs to an older carryover delegate. This has happened multiple times: dispatching `deleg_838c7793` for EV research but using `deleg_cf178d38` (a different session's completed report on the same topic). The fix is strict ID verification, not "good enough" topic matching.
-
-Procedure:
-1. **Capture IDs at dispatch.** When calling `delegate_task`, read the `delegation_id` (or each task's ID in batch mode) from the tool call output and store them — e.g., `oil: deleg_028a5988`, `ev: deleg_838c7793`. Write them down explicitly. Do not rely on topic matching alone.
-2. **Verify on completion.** When an `ASYNC DELEGATION BATCH COMPLETE` banner arrives, check the `delegation_id` in the banner against your recorded list. A mismatch means the report may belong to an older carryover delegate that was still running or got a manual `continue` signal.
-3. **Cross-reference session_search — anchor on ID, not topic.** Use `session_search(query="...", sort="newest")` and look for the `delegation_id` in the banner text of completed messages. Do NOT grab the first report that "looks right" by topic — scan through results until you find one whose banner contains the exact `delegation_id` you dispatched. Anchor on message position (scroll forward from last known) rather than text-matching topics, since older reports may sit in history with the same topic.
-4. **Distinguish carryover vs fresh.** A carryover completion has a different `delegation_id` than what you dispatched this turn. It will have its own banner with the older ID. Do not assume the latest-looking report corresponds to your most recent dispatch — check the ID explicitly.
-5. **When in doubt, re-dispatch.** If a delegate is stuck (e.g., vLLM timeout) and has been receiving manual signals, it may complete with a stale `delegation_id` that confuses attribution. Dispatch a fresh one if you need guaranteed clean attribution.
-6. **Wait for the right ID before synthesizing.** When dispatching multiple subagents, do not synthesize the final report until you have confirmed both (or all) completion banners contain the exact `delegation_id` values you recorded at dispatch. If one is still running past its expected duration, wait or re-dispatch rather than substituting a carryover.
-
-### Waiting Protocol — Don't Give Up Too Early
-
-When dispatching multiple subagents in parallel, **do not synthesize until all expected delegates have completed**. The most common error pattern: one delegate finishes quickly, the other is still running (longer than expected), and you substitute a carryover report from an older session instead of waiting.
-
-**Explicit waiting steps:**
-
-1. **Record expected count.** After dispatching N subagents, note `expected = N`. Each time a completion banner arrives, decrement. Synthesize when `remaining == 0` AND all IDs match.
-
-2. **Use the 3x timeout rule.** If a delegate is still running after **3x its peer's duration**, it may be slow but not stuck. Example: oil finishes in 156s; EV is still running at 468s (3x). At this point, check whether it's genuinely slow (normal) or stuck (vLLM timeout, network issue). Do NOT substitute a carryover before this threshold unless you detect an explicit error.
-
-3. **Check for the banner before substituting.** Before grabbing a `session_search` result as a substitute, verify: does its banner contain the exact `delegation_id` I recorded? If yes → use it. If no (it's a different ID) → do NOT use it as a substitute; keep waiting for the real one.
-
-4. **If you must synthesize early due to context pressure**, explicitly note which delegate(s) are still running and defer their integration. Example: "Synthesizing with oil report complete; EV report (deleg_838c7793) is still arriving — will incorporate when it lands." This prevents silent substitution errors.
-
-5. **After synthesizing, check for late arrivals.** If a delegate completes after your synthesis, review whether its data should be folded in. If the late result adds new information (not just redundant), add a follow-up note.
-
-**Decision tree when one delegate is still running:**
-```
-Is completion banner received with matching delegation_id?
-  YES → Use it, continue to synthesis
-  NO  → Is it past 3x peer duration?
-          YES → Check if stuck (vLLM timeout, etc.)
-                 Stuck → Re-dispatch or substitute carryover (note it)
-                 Not stuck → Wait up to 60s more
-          NO  → Continue waiting (it's just slow)
-```
-
-#### Parallel Research Pattern
-
-When the user asks for broad research on a topic, dispatch multiple subagents
-with **distinct angles** (chronological periods, themes, or dimensions) in
-parallel. Each subagent writes to its own workspace file; you then review and
-consolidate into a single summary document.
-
-**Procedure:**
-
-1. **Plan the angles.** Identify N distinct research dimensions. Common patterns:
-   - Chronological (e.g., early era, mid-century, modern)
-   - Thematic (e.g., legal framework, cultural attitudes, technological disruption)
-   - Geographic (e.g., US, UK, continental Europe)
-   - By subject area (e.g., film, print, digital media)
-
-2. **Dispatch in batch.** Use `delegate_task(tasks=[...])` with each task having:
-   - A clear `goal` specifying the angle and time scope
-   - A specific output file path (use a consistent naming convention, e.g., `workspace/topic_era.md`)
-   - Appropriate `toolsets` (usually `web, file, terminal` for research)
-   - Enough context so each subagent is self-contained
-
-3. **Verify max_concurrent_children.** Before dispatching, check that N ≤ the configured cap (default 3; set explicitly via `hermes config set delegation.max_concurrent_children N`). This session confirmed 4–10 slots are reliable for LAN server setups.
-
-4. **Wait for all banners.** Don't synthesize until all expected completion banners arrive with matching `delegation_id` values. Use the Waiting Protocol above — do not substitute carryover reports based on topic alone.
-
-5. **Review each file.** Read each workspace file to verify quality and check for overlap or gaps between angles.
-
-6. **Create a consolidated summary.** Write a single summary document that:
-   - Opens with an executive overview connecting all angles
-   - Summarizes each period/angle in its own section (referencing the source files)
-   - Includes cross-era synthesis identifying recurring themes, patterns, and causal connections
-   - Provides a master timeline or key dates table
-   - Lists individual report file paths as references
-
-7. **Note any issues.** Record which subagents encountered problems (search failures, dead pages, etc.) — this helps future sessions calibrate expectations for similar research tasks.
-
-**Example dispatch pattern:**
-```python
-delegate_task(tasks=[
-    {"goal": "Research X from angle A. Cover Y and Z. Write to workspace/x_angle_a.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
-    {"goal": "Research X from angle B. Cover Y and Z. Write to workspace/x_angle_b.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
-    {"goal": "Research X from angle C. Cover Y and Z. Write to workspace/x_angle_c.md", "context": "...", "toolsets": ["web", "file", "terminal"]},
-])
-# Then: read all files → write workspace/x_summary.md
-```
-
-**When NOT to use this pattern:** For narrow, focused questions where a single subagent suffices. Use parallel research when the topic has natural dimensions that benefit from independent deep-dives.
-
-### Cron (scheduled jobs)
-
-Durable scheduler — `cron/jobs.py` + `cron/scheduler.py`. Drive it via
-the `cronjob` tool, the `hermes cron` CLI (`list`, `add`, `edit`,
-`pause`, `resume`, `run`, `remove`), or the `/cron` slash command.
-
-- **Schedules:** duration (`"30m"`, `"2h"`), "every" phrase
-  (`"every monday 9am"`), 5-field cron (`"0 9 * * *"`), or ISO timestamp.
-- **Per-job knobs:** `skills`, `model`/`provider` override, `script`
-  (pre-run data collection; `no_agent=True` makes the script the whole
-  job), `context_from` (chain job A's output into job B), `workdir`
-  (run in a specific dir with its `AGENTS.md` / `CLAUDE.md` loaded),
-  multi-platform delivery.
-- **Invariants:** 3-minute hard interrupt per run, `.tick.lock` file
-  prevents duplicate ticks across processes, cron sessions pass
-  `skip_memory=True` by default, and cron deliveries are framed with a
-  header/footer instead of being mirrored into the target gateway
-  session (keeps role alternation intact).
-
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/cron
-
-### Curator (skill lifecycle)
-
-Background maintenance for agent-created skills. Tracks usage, marks
-idle skills stale, archives stale ones, keeps a pre-run tar.gz backup
-so nothing is lost.
-
-- **CLI:** `hermes curator <verb>` — `status`, `run`, `pause`, `resume`,
-  `pin`, `unpin`, `archive`, `restore`, `prune`, `backup`, `rollback`.
-- **Slash:** `/curator <subcommand>` mirrors the CLI.
-- **Scope:** only touches skills with `created_by: "agent"` provenance.
-  Bundled + hub-installed skills are off-limits. **Never deletes** —
-  max destructive action is archive. Pinned skills are exempt from
-  every auto-transition and every LLM review pass.
-- **Cost:** the deterministic inactivity/prune sweep runs for free. The
-  aux-model "consolidate overlapping skills into umbrellas" pass is
-  **off by default** — opt in with `curator.consolidate: true` or
-  `hermes curator run --consolidate`. Routine background curation costs
-  zero tokens.
-- **Telemetry:** sidecar at `~/.hermes/skills/.usage.json` holds
-  per-skill `use_count`, `view_count`, `patch_count`,
-  `last_activity_at`, `state`, `pinned`.
-
-Config: `curator.*` (`enabled`, `interval_hours`, `min_idle_hours`,
-`stale_after_days`, `archive_after_days`, `backup.*`).
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/curator
-
-### Kanban (multi-agent work queue)
-
-Durable SQLite board for multi-profile / multi-worker collaboration.
-Users drive it via `hermes kanban <verb>`; dispatcher-spawned workers
-see a focused `kanban_*` toolset gated by `HERMES_KANBAN_TASK`, and
-orchestrator profiles can opt into the broader `kanban` toolset. Normal
-sessions still have zero `kanban_*` schema footprint unless configured.
-
-- **CLI verbs (common):** `init`, `create`, `list` (alias `ls`),
-  `show`, `assign`, `link`, `unlink`, `comment`, `complete`, `block`,
-  `unblock`, `archive`, `tail`. Less common: `watch`, `stats`, `runs`,
-  `log`, `dispatch`, `daemon`, `gc`.
-- **Worker/orchestrator toolset:** `kanban_show`, `kanban_complete`,
-  `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`,
-  `kanban_link`; profiles that explicitly enable the `kanban` toolset
-  outside a dispatcher-spawned task also get `kanban_list` and
-  `kanban_unblock` for board routing.
-- **Dispatcher** runs inside the gateway by default
-  (`kanban.dispatch_in_gateway: true`) — reclaims stale claims,
-  promotes ready tasks, atomically claims, spawns assigned profiles.
-  Auto-blocks a task after `failure_limit` consecutive spawn failures
-  (default 2; configurable via `kanban.failure_limit` or per-task
-  `max_retries`).
-- **Isolation:** board is the hard boundary (workers get
-  `HERMES_KANBAN_BOARD` pinned in env); tenant is a soft namespace
-  within a board for workspace-path + memory-key isolation.
-
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
-
----
-
-## Surfaces & Other Capabilities
-
-Beyond the CLI and gateway, a few things worth knowing about:
-
-- **Desktop app** (`hermes desktop` / `hermes gui`) — native Electron app
-  for macOS/Linux/Windows: streaming chat, session list, drag-and-drop +
-  clipboard-paste files, Cmd+K palette, status-bar model picker,
-  rebindable shortcuts, native notifications, live subagent watch-windows,
-  VS Code Marketplace themes, and per-profile remote-gateway login (OAuth
-  or username/password) so a thin local GUI can drive a heavy remote agent.
-- **Web dashboard** (`hermes dashboard`) — full admin panel: configure
-  every messaging channel, the MCP catalog, webhooks/hooks, memory, and a
-  complete profile builder (model + skills + MCPs) from the browser, plus
-  an embedded `hermes --tui` chat. Secured behind an OAuth/token gate.
-- **OpenAI-compatible proxy** (`hermes proxy`) — exposes a
-  `http://localhost:port` OpenAI API backed by whichever OAuth provider
-  you're signed into (Claude Pro, ChatGPT Pro, SuperGrok). Point Codex
-  CLI, Aider, Cline, Continue, or any script at it — no API key.
-- **Automation Blueprints** — pick a named automation and Hermes asks for
-  what it needs (no cron syntax). One definition renders as a dashboard
-  form, a slash command, an agent conversation, and a docs-catalog entry.
-- **`memory` tool batch operations** — pass an `operations` array of
-  add/replace/remove edits applied atomically against the final character
-  budget, so a single call can free space and add entries even when an add
-  alone would overflow.
-- **`session_search`** — FTS5-backed, no aux-LLM, effectively free. One
-  tool, three modes inferred from which args are set: discovery (`query`),
-  scroll (`session_id` + `around_message_id`), browse (no args).
-- **xAI Grok via SuperGrok OAuth** — sign in with your xAI account (no API
-  key); includes Cursor's `grok-composer-2.5-fast` coding model.
-
----
+See `delegation-routing` and `subagent-delegation` skills for detailed routing patterns, the `subagent_routing` block, queue management, and dispatcher bugs.
 
 ## Windows-Specific Quirks
 
-Hermes runs natively on Windows (PowerShell, cmd, Windows Terminal, git-bash
-mintty, VS Code integrated terminal). Most of it just works, but a handful
-of differences between Win32 and POSIX have bitten us — document new ones
-here as you hit them so the next person (or the next session) doesn't
-rediscover them from scratch.
-
 ### Input / Keybindings
 
-**Alt+Enter doesn't insert a newline** — Windows Terminal (and mintty) grab it
-for fullscreen before prompt_toolkit sees it. Use **Ctrl+Enter** instead (the
-CLI binds it to newline on Windows; raw Ctrl+J does the same, harmlessly).
-To inspect how your terminal reports a keystroke, run
-`python scripts/keystroke_diagnostic.py` from the repo root.
+**Alt+Enter doesn't insert a newline.** Windows Terminal intercepts Alt+Enter at the terminal layer to toggle fullscreen. Use **Ctrl+Enter** instead (delivered as LF `c-j`, distinct from plain Enter `c-m`).
+
+mintty / git-bash behaves the same unless you disable Alt+Fn shortcuts in Options → Keys.
+
+**Diagnosing keybindings.** Run `python scripts/keystroke_diagnostic.py` (repo root) to see exactly how prompt_toolkit identifies each keystroke in the current terminal.
 
 ### Config / Files
 
-**HTTP 400 "No models provided" on first run** — `config.yaml` was saved with
-a UTF-8 BOM (Notepad does this). Re-save as UTF-8 without BOM;
-`hermes config edit` writes correctly.
+**HTTP 400 "No models provided" on first run.** `config.yaml` was saved with a UTF-8 BOM (common when Windows apps write it). Re-save as UTF-8 without BOM. `hermes config edit` writes without BOM; manual edits in Notepad are the usual culprit.
 
 ### `execute_code` / Sandbox
 
-**WinError 10106** from the sandbox child process — it can't create an
-`AF_INET` socket. Root cause is usually Hermes's env scrubber dropping
-`SYSTEMROOT`/`WINDIR`/`COMSPEC` (Python's `socket` needs `SYSTEMROOT` to find
-`mswsock.dll`), not a broken Winsock LSP. The `_WINDOWS_ESSENTIAL_ENV_VARS`
-allowlist in `tools/code_execution_tool.py` covers it; if you still hit it,
-echo `os.environ` inside an `execute_code` block to confirm `SYSTEMROOT` is set.
+**WinError 10106** — sandbox child can't create `AF_INET` socket. Root cause: Hermes's env scrubber dropping `SYSTEMROOT`/`WINDIR`/`COMSPEC`. Fixed via `_WINDOWS_ESSENTIAL_ENV_VARS` allowlist in `tools/code_execution_tool.py`. If still hitting it, echo `os.environ` inside an `execute_code` block to confirm `SYSTEMROOT` is set.
 
-### Testing on Windows
+### Testing
 
-`scripts/run_tests.sh` is POSIX-only (expects `.venv/bin/activate`); the
-Hermes-installed `venv/Scripts/` has no pip/pytest (stripped for size).
-Install pytest into a system Python and run directly with `-n 0`
-(`pyproject.toml`'s `addopts` already sets `-n`):
+**`scripts/run_tests.sh` doesn't work as-is on Windows** — looks for POSIX venv layouts. Workaround:
 
 ```bash
 "/c/Program Files/Python311/python" -m pip install --user pytest pytest-xdist pyyaml
@@ -1088,20 +749,21 @@ export PYTHONPATH="$(pwd)"
 "/c/Program Files/Python311/python" -m pytest tests/foo/test_bar.py -v --tb=short -n 0
 ```
 
-(POSIX-only tests need skip guards — see the cross-platform guard list in the
-Contributor section below.)
+Use `-n 0` (not `-n 4`). POSIX-only tests need skip guards — see `AGENTS.md` for common markers.
+
+**Monkeypatching `sys.platform` is not enough** when code also calls `platform.system()`/`platform.release()`. Patch all three together:
+
+```python
+monkeypatch.setattr(sys, "platform", "linux")
+monkeypatch.setattr(platform, "system", lambda: "Linux")
+monkeypatch.setattr(platform, "release", lambda: "6.8.0-generic")
+```
 
 ### Path / Filesystem
 
-**Line endings.** Git may warn `LF will be replaced by CRLF`. Cosmetic — the
-repo's `.gitattributes` normalizes. Don't let editors auto-convert committed
-POSIX-newline files to CRLF.
+**Line endings.** Don't let editors auto-convert committed POSIX-newline files to CRLF.
 
-**Forward slashes work almost everywhere.** `C:/Users/...` is accepted by
-every Hermes tool and most Windows APIs. Prefer forward slashes in code
-and logs — avoids shell-escaping backslashes in bash.
-
----
+**Forward slashes work almost everywhere.** `C:/Users/...` is accepted by every Hermes tool. Prefer forward slashes in code and logs.
 
 ## Troubleshooting
 
@@ -1119,7 +781,7 @@ and logs — avoids shell-escaping backslashes in bash.
 1. `hermes doctor` — check config and dependencies
 2. `hermes auth` — re-authenticate OAuth providers (or `hermes auth add <provider>`)
 3. Check `.env` has the right API key
-4. **Copilot 403**: `gh auth login` tokens do NOT work for Copilot API. You must use the Copilot-specific OAuth device code flow via `hermes model` → GitHub Copilot.
+4. **Copilot 403**: `gh auth login` tokens do NOT work for Copilot API. Use `hermes model` → GitHub Copilot (OAuth device code flow).
 
 ### Changes not taking effect
 - **Tools/skills:** `/reset` starts a new session with updated toolset
@@ -1132,29 +794,26 @@ and logs — avoids shell-escaping backslashes in bash.
 3. Load explicitly: `/skill name` or `hermes -s name`
 
 ### Gateway issues
-Check logs first:
 ```bash
 grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
 ```
 
-Common gateway problems:
-- **Gateway dies on SSH logout**: Enable linger: `sudo loginctl enable-linger $USER`
-- **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
-- **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
+- **Gateway dies on SSH logout**: `sudo loginctl enable-linger $USER`
+- **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf`
+- **Gateway crash loop**: `systemctl --user reset-failed hermes-gateway`
 
 ### Platform-specific issues
 - **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.
-- **Slack bot only works in DMs**: Must subscribe to `message.channels` event. Without it, the bot ignores public channels.
-- **Windows-specific issues** (`Alt+Enter` newline, WinError 10106, UTF-8 BOM config, test suite, line endings): see the dedicated **Windows-Specific Quirks** section above.
+- **Slack bot only works in DMs**: Must subscribe to `message.channels` event.
 
 ### Auxiliary models not working
-If `auxiliary` tasks (vision, compression, session_search) fail silently, the `auto` provider can't find a backend. Either set `OPENROUTER_API_KEY` or `GOOGLE_API_KEY`, or explicitly configure each auxiliary task's provider:
+
+If `auxiliary` tasks (vision, compression, session_search) fail silently, the `auto` provider can't find a backend. Either set `OPENROUTER_API_KEY` or `GOOGLE_API_KEY`, or explicitly configure:
+
 ```bash
 hermes config set auxiliary.vision.provider <your_provider>
 hermes config set auxiliary.vision.model <model_name>
 ```
-
----
 
 ## Where to Find Things
 
@@ -1175,149 +834,3 @@ hermes config set auxiliary.vision.model <model_name>
 | Gateway logs | `~/.hermes/logs/gateway.log` |
 | Session files | `hermes sessions browse` (reads state.db) |
 | Source code | `~/.hermes/hermes-agent/` |
-
----
-
-## Contributor Quick Reference
-
-For occasional contributors and PR authors. Full developer docs: https://hermes-agent.nousresearch.com/docs/developer-guide/
-
-### Project Layout
-
-```
-hermes-agent/
-├── run_agent.py          # AIAgent — core conversation loop
-├── model_tools.py        # Tool discovery and dispatch
-├── toolsets.py           # Toolset definitions
-├── cli.py                # Interactive CLI (HermesCLI)
-├── hermes_state.py       # SQLite session store
-├── agent/                # Prompt builder, context compression, memory, model routing, credential pooling, skill dispatch
-├── hermes_cli/           # CLI subcommands, config, setup, commands
-│   ├── commands.py       # Slash command registry (CommandDef)
-│   ├── config.py         # DEFAULT_CONFIG, env var definitions
-│   └── main.py           # CLI entry point and argparse
-├── tools/                # One file per tool
-│   └── registry.py       # Central tool registry
-├── gateway/              # Messaging gateway
-│   └── platforms/        # Platform adapters (telegram, discord, etc.)
-├── cron/                 # Job scheduler
-├── tests/                # Extensive pytest suite (run via scripts/run_tests.sh)
-└── website/              # Docusaurus docs site
-```
-
-Config: `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys) — both under `$HERMES_HOME` when it is set.
-
-### Adding a Tool
-
-Two files. Auto-discovery imports any `tools/*.py` with a top-level
-`registry.register()` call, but a tool is only *exposed* to an agent once
-its name appears in a toolset.
-
-**1. Create `tools/your_tool.py`:**
-```python
-import json, os
-from tools.registry import registry
-
-def check_requirements() -> bool:
-    return bool(os.getenv("EXAMPLE_API_KEY"))
-
-def example_tool(param: str, task_id: str = None) -> str:
-    return json.dumps({"success": True, "data": "..."})
-
-registry.register(
-    name="example_tool",
-    toolset="example",
-    schema={"name": "example_tool", "description": "...", "parameters": {...}},
-    handler=lambda args, **kw: example_tool(
-        param=args.get("param", ""), task_id=kw.get("task_id")),
-    check_fn=check_requirements,
-    requires_env=["EXAMPLE_API_KEY"],
-)
-```
-
-**2. Wire it into a toolset in `toolsets.py`** — add the name to
-`_HERMES_CORE_TOOLS` (every platform) or to a specific toolset.
-
-All handlers must return JSON strings. Use `get_hermes_home()` for paths,
-never hardcode `~/.hermes`. For custom/local-only tools, write a plugin in
-`~/.hermes/plugins/` instead of editing core — see the developer docs.
-
-### Adding a Slash Command
-
-1. Add `CommandDef` to `COMMAND_REGISTRY` in `hermes_cli/commands.py`
-2. Add handler in `cli.py` → `process_command()`
-3. (Optional) Add gateway handler in `gateway/run.py`
-
-All consumers (help text, autocomplete, Telegram menu, Slack mapping) derive from the central registry automatically.
-
-### Agent Loop (High Level)
-
-```
-run_conversation():
-  1. Build system prompt
-  2. Loop while iterations < max:
-     a. Call LLM (OpenAI-format messages + tool schemas)
-     b. If tool_calls → dispatch each via handle_function_call() → append results → continue
-     c. If text response → return
-  3. Context compression triggers automatically near token limit
-```
-
-### Testing
-
-Use the canonical runner — it enforces CI-parity (hermetic env, unset
-credentials, TZ=UTC, xdist workers, per-test subprocess isolation):
-
-```bash
-scripts/run_tests.sh                          # full suite
-scripts/run_tests.sh tests/tools/             # one directory
-scripts/run_tests.sh tests/tools/test_x.py    # one file
-scripts/run_tests.sh -v --tb=long             # pass-through pytest flags
-```
-
-- Tests auto-redirect `HERMES_HOME` to temp dirs — never touch real `~/.hermes/`.
-- The script probes `.venv`, then `venv`, then the shared worktree venv.
-- **Windows:** the wrapper is POSIX-only; see the **Windows-Specific Quirks**
-  section above for the direct-pytest workaround.
-
-**Cross-platform test guards:** tests using POSIX-only syscalls need a skip marker. Common ones already in the codebase:
-- Symlink creation → `@pytest.mark.skipif(sys.platform == "win32", reason="Symlinks require elevated privileges on Windows")` (see `tests/cron/test_cron_script.py`)
-- POSIX file modes (0o600, etc.) → `@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mode bits not enforced on Windows")` (see `tests/hermes_cli/test_auth_toctou_file_modes.py`)
-- `signal.SIGALRM` → Unix-only (see `tests/conftest.py::_enforce_test_timeout`)
-- Live Winsock / Windows-specific regression tests → `@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific regression")`
-
-**Monkeypatching `sys.platform` is not enough** when the code under test also calls `platform.system()` / `platform.release()` / `platform.mac_ver()`. Those functions re-read the real OS independently, so a test that sets `sys.platform = "linux"` on a Windows runner will still see `platform.system() == "Windows"` and route through the Windows branch. Patch all three together:
-
-```python
-monkeypatch.setattr(sys, "platform", "linux")
-monkeypatch.setattr(platform, "system", lambda: "Linux")
-monkeypatch.setattr(platform, "release", lambda: "6.8.0-generic")
-```
-
-See `tests/agent/test_prompt_builder.py::TestEnvironmentHints` for a worked example.
-
-### System prompt's execution-environment block
-
-Factual host/backend guidance (OS, `$HOME`, cwd, terminal backend, shell)
-is emitted by `agent/prompt_builder.py::build_environment_hints()`. The key
-invariant for prompt authors: with a **remote** terminal backend
-(`docker, singularity, modal, daytona, ssh, managed_modal`), host info is
-suppressed and *every* file tool runs inside the backend container — the
-prompt must never describe the host the agent can't touch.
-
-### Commit Conventions
-
-```
-type: concise subject line
-
-Optional body.
-```
-
-Types: `fix:`, `feat:`, `refactor:`, `docs:`, `chore:`
-
-### Key Rules
-
-- **Never break prompt caching** — don't change context, tools, or system prompt mid-conversation
-- **Message role alternation** — never two assistant or two user messages in a row
-- Use `get_hermes_home()` from `hermes_constants` for all paths (profile-safe)
-- Config values go in `config.yaml`, secrets go in `.env`
-- New tools need a `check_fn` so they only appear when requirements are met
