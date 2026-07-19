@@ -1570,7 +1570,44 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         return
                 
                 # Compute next run
-                job["next_run_at"] = compute_next_run(job["schedule"], now)
+                raw_next = compute_next_run(job["schedule"], now)
+                
+                # For recurring cron jobs with a fixed daily time (e.g., "0 9 * * *"),
+                # ensure next_run_at is set correctly after any run — manual or scheduled.
+                # 
+                # The key insight: when a manual trigger fires BEFORE the configured
+                # daily time (e.g., 03:00 for "0 9 * * *"), the scheduled slot at 09:00
+                # hasn't been consumed yet — it should still fire. So next_run_at stays
+                # at today's 09:00. When a manual trigger fires AFTER the configured time
+                # (e.g., 12:00), that day's slot has passed — advance to tomorrow.
+                # 
+                # For scheduled runs, advance_next_run() already bumped next_run_at before
+                # execution, so mark_job_run() just confirms it. The logic below handles
+                # both cases uniformly by checking if the computed next_run is in the past
+                # relative to now — if so, advance one full cycle.
+                if raw_next:
+                    try:
+                        next_dt = _ensure_aware(datetime.fromisoformat(raw_next))
+                        now_dt = _ensure_aware(datetime.fromisoformat(now))
+                        if next_dt <= now_dt:
+                            # The computed next_run is in the past (or equal to now).
+                            # This means either:
+                            # 1. A manual trigger fired after the scheduled time (e.g., 12:00),
+                            #    so today's slot has passed — advance to tomorrow.
+                            # 2. The job was stuck with a past next_run_at (the original bug).
+                            from croniter import croniter
+                            base = _ensure_aware(datetime.fromisoformat(
+                                job.get("last_run_at") or now
+                            ))
+                            cron_obj = croniter(job["schedule"]["expr"], base)
+                            candidate = cron_obj.get_next(datetime)
+                            while candidate <= now_dt:
+                                candidate = cron_obj.get_next(datetime)
+                            raw_next = candidate.isoformat()
+                    except Exception:
+                        pass  # If anything fails, use raw_next as-is
+                
+                job["next_run_at"] = raw_next
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't
