@@ -4175,7 +4175,23 @@ def _make_fetchWebContent_browser_fallback(handler, server_name: str, tool_name:
         "No readable content was extracted",
         "Request URL could not be resolved",
         "Failed to fetch web content",
+        "status code 404",       # SPA/client-side routing pages that need a real browser
+        "status code 500",       # server errors on JS-heavy pages
     ]
+
+    def _is_empty_success(result: str) -> bool:
+        """Check for success:true with suspiciously short content (JS shell)."""
+        try:
+            parsed = json.loads(result)
+            if not isinstance(parsed, dict):
+                return False
+            if not parsed.get("success"):
+                return False
+            # Check various content fields — if all are very short, it's likely a JS shell
+            content = (parsed.get("content", "") or "").strip()
+            return len(content) < 200
+        except (json.JSONDecodeError, AttributeError):
+            return False
 
     def _is_js_error(result: str) -> bool:
         try:
@@ -4188,8 +4204,8 @@ def _make_fetchWebContent_browser_fallback(handler, server_name: str, tool_name:
     def _fallback_handler(args: dict, **kwargs) -> str:
         result = handler(args, **kwargs)
 
-        # Only fallback on JS-rendered/no-content errors
-        if not _is_js_error(result):
+        # Only fallback on JS-rendered/no-content errors or empty success shells
+        if not _is_js_error(result) and not _is_empty_success(result):
             return result
 
         # Check if Camofox is available
