@@ -710,6 +710,16 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 4. **Use `--bare`** for CI/scripting to skip plugin/hook discovery overhead.
 5. **Use `--allowedTools`** to restrict to only what's needed (e.g., `Read` only for reviews).
 6. **Use `/compact`** in interactive sessions when context gets large.
+7. **Poll for completion on CLI (delegate_task)** — after dispatching subagents, poll transcript files every 30s (`grep "exit_reason=completed" <transcript_path>`) until all finish. Do NOT rely on `notify_on_complete` which is unreliable on CLI. Pattern:
+
+   ```bash
+   # After delegating N subagents, start polling:
+   for i in $(seq 1 60); do
+       done=$(grep -l "exit_reason=completed" <transcript_1> <transcript_2> ... | wc -l)
+       [ "$done" = "N" ] && echo "ALL COMPLETE" && break
+       sleep 30
+   done
+   ```
 7. **Pipe input** instead of having Claude read files when you just need analysis of known content.
 8. **Use `--model haiku`** for simple tasks (cheaper) and `--model opus` for complex multi-step work.
 9. **Use `--fallback-model haiku`** in print mode to gracefully handle model overload.
@@ -736,7 +746,42 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 1. **Prefer print mode (`-p`) for single tasks** — cleaner, no dialog handling, structured output
 2. **Use tmux for multi-turn interactive work** — the only reliable way to orchestrate the TUI
 3. **Always set `workdir`** — keep Claude focused on the right project directory
-4. **Set `--max-turns` in print mode** — prevents infinite loops and runaway costs
+4. **Read defaults from two config sources** — before calling `claude -p`, check both locations:
+
+   **Global subagent settings** (`subagent_routing.claude_code` in `~/.hermes/config.yaml`):
+   ```yaml
+   subagent_routing:
+     claude_code:
+       max_turns: 30            # --max-turns flag
+       allowed_tools: Read,Write,Bash,Grep,Edit,mcp__mnemosyne-claude__*  # --allowedTools flag
+   ```
+
+   **Per-backend properties** (`custom_providers.models.<model>` in `~/.hermes/config.yaml`):
+   ```yaml
+   custom_providers:
+     - name: .224
+       models:
+         Qwen3.6-27B-FP8:
+           context_length: 131072   # → CLAUDE_CODE_AUTO_COMPACT_WINDOW
+           max_tokens: 8192         # → CLAUDE_CODE_MAX_OUTPUT_TOKENS
+   ```
+
+   **Only pass LLM_MODEL and ANTHROPIC_BASE_URL** (stripped of `/v1/`) as env overrides. Context windows are deployment-configured — compression triggers at 0.85; max output tokens forced to 65,536 by both Hermes and Claude Code. No per-call overrides needed for `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or `CLAUDE_CODE_MAX_OUTPUT_TOKENS`.
+
+   Build the command:
+   ```bash
+   # Global subagent defaults (from subagent_routing.claude_code)
+   MAX_TURNS=$(hermes config get subagent_routing.claude_code.max_turns 2>/dev/null || echo 30)
+   ALLOWED_TOOLS=$(hermes config get subagent_routing.claude_code.allowed_tools 2>/dev/null || echo "Read,Write,Bash")
+
+   # Build the command — only LLM_MODEL and ANTHROPIC_BASE_URL needed per-call
+   LLM_MODEL="..." \
+   ANTHROPIC_BASE_URL="http://192.168.1.XXX:5678" \
+   claude -p "task prompt" --allowedTools "$ALLOWED_TOOLS" --max-turns "$MAX_TURNS"
+   ```
+
+   Context windows per backend: 204,800 for .224 (.223/.221), 262,144 for .222. Compression triggers at 131,072 and 188,416 tokens respectively (~0.85).
+
 5. **Monitor tmux sessions** — use `tmux capture-pane -t <session> -p -S -50` to check progress
 6. **Look for the `❯` prompt** — indicates Claude is waiting for input (done or asking a question)
 7. **Clean up tmux sessions** — kill them when done to avoid resource leaks
