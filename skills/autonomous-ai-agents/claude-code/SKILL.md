@@ -710,12 +710,12 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 4. **Use `--bare`** for CI/scripting to skip plugin/hook discovery overhead.
 5. **Use `--allowedTools`** to restrict to only what's needed (e.g., `Read` only for reviews).
 6. **Use `/compact`** in interactive sessions when context gets large.
-7. **Poll for completion on CLI (delegate_task)** — after dispatching subagents, poll transcript files every 30s (`grep "exit_reason=completed" <transcript_path>`) until all finish. Do NOT rely on `notify_on_complete` which is unreliable on CLI. Pattern:
+7. **Poll for completion on CLI (delegate_task)** — after dispatching subagents, poll transcript files every 30s (`grep "final.*end status=" <transcript_path>`) until all finish. `notify_on_complete` is unreliable when managing multiple concurrent subagents due to rate-limiting. Pattern:
 
    ```bash
    # After delegating N subagents, start polling:
    for i in $(seq 1 60); do
-       done=$(grep -l "exit_reason=completed" <transcript_1> <transcript_2> ... | wc -l)
+       done=$(grep -l "final.*end status=" <transcript_1> <transcript_2> ... | wc -l)
        [ "$done" = "N" ] && echo "ALL COMPLETE" && break
        sleep 30
    done
@@ -822,18 +822,18 @@ When using `delegate_task()` instead of direct `terminal()` calls, follow these 
    ```
    This handles the case where they finish before you need to move on. If the user messages during the wait, it gets interrupted — but step 3 catches it on the next turn.
 
-4. **Report dispatch table** — show delegation_id, goal, server IP (e.g., `192.168.1.224`), model, and type at dispatch:
+5. **Report dispatch table** — show delegation_id, goal, server IP (e.g., `192.168.1.224`), model, and type at dispatch:
    ```
    | # | Delegation ID  | Server IP      | Model              | Type           | Status    |
    |---|----------------|----------------|--------------------|----------------|-----------|
    | 1 | deleg_abc12345 | 192.168.1.224  | Qwen3.6-27B-FP8    | Claude Code    | Running   |
    ```
 
-5. **Virtiofs write persistence** — subagent edits DO persist to disk, but subagent self-verification (read-back) can show stale content due to virtiofs page cache. The authoritative check is always from the parent:
+6. **Virtiofs write persistence** — subagent edits DO persist to disk, but subagent self-verification (read-back) can show stale content due to virtiofs page cache. The authoritative check is always from the parent:
    - Subagent applies edit → reports done (self-verify optional)
    - Parent verifies externally via `cat`/`grep` after pulling results — this is the source of truth
    - If parent verification fails, re-apply directly via `patch` tool
 
-6. **Surface results immediately** — after the wait completes, read the transcript's final assistant message and present the summary to the user.
+7. **Surface results immediately** — after the wait completes, read the transcript's final assistant message and present the summary to the user.
 
-6. **Multiple subagents = multiple waits** — dispatch all subagents first (one watcher each), then wait for each one sequentially as you need its results.
+8. **Multiple subagents = multiple waits** — dispatch all subagents first (one watcher each), then wait for each one sequentially as you need its results.

@@ -15026,6 +15026,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
                     session_key = getattr(self, "session_id", "") or ""
                     for evt in async_events:
+                        # Ownership check BEFORE claim — prevents cross-session
+                        # delivery when multiple CLI instances share the same profile.
+                        # The idle drain uses _owns_process_notification; the watcher
+                        # must do the same so only this session's events are delivered.
+                        if not self._owns_process_notification(evt):
+                            _pr.completion_queue.put(evt)
+                            continue
                         # Claim FIRST — before formatting — so even unformatable
                         # events get delivery_attempts incremented and don't sit
                         # pending forever. Without this, a format_process_notification
@@ -15043,8 +15050,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         if not synth_text:
                             complete_event_delivery(evt, claim)
                             continue
+                        # Complete delivery in DB BEFORE pushing to _pending_input.
+                        # If the claim is stale (complete returns False), requeue
+                        # so another watcher cycle or process restart can redeliver —
+                        # avoids duplicate turns when the DB still shows 'pending'.
+                        if not complete_event_delivery(evt, claim):
+                            _pr.completion_queue.put(evt)
+                            continue
                         self._pending_input.put(synth_text)
-                        complete_event_delivery(evt, claim)
                 except Exception as e:
                     logger.warning("Async delegation watcher error: %s", e, exc_info=True)
                 _time.sleep(2.0)

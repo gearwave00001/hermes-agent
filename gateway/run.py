@@ -17105,6 +17105,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         delivered = await self._deliver_completion_notification(synth_text, evt)
                         if delivered is False:
                             _pr.completion_queue.put(evt)
+                        elif delivered is None:
+                            # No route found (e.g., CLI-origin event with no cached
+                            # fallback). Requeue so the next poll cycle can retry —
+                            # a gateway session may arrive before the event times out.
+                            _pr.completion_queue.put(evt)
                     except Exception as e:
                         _pr.completion_queue.put(evt)
                         logger.error("Async delegation injection error: %s", e)

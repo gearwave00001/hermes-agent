@@ -2397,6 +2397,15 @@ DEFAULT_CONFIG = {
         "subagent_auto_approve": False,
     },
 
+    # Subagent routing overrides — per-tool defaults for delegated subagents.
+    # Optional user-defined section; if absent, subagents use built-in defaults.
+    "subagent_routing": {
+        "claude_code": {
+            "max_turns": 50,           # --max-turns flag for claude -p calls
+            "allowed_tools": "Read,Write,Bash,Grep,Edit",  # --allowedTools comma-separated list
+        }
+    },
+
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.

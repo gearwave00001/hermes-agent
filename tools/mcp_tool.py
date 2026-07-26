@@ -4189,7 +4189,7 @@ def _make_fetchWebContent_browser_fallback(handler, server_name: str, tool_name:
                 return False
             # Check various content fields — if all are very short, it's likely a JS shell
             content = (parsed.get("content", "") or "").strip()
-            return len(content) < 200
+            return len(content) < 500
         except (json.JSONDecodeError, AttributeError):
             return False
 
