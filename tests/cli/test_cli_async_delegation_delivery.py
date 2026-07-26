@@ -19,8 +19,16 @@ def test_cli_completion_drain_uses_visible_session_identity(monkeypatch):
     calls = []
 
     class FakeRegistry:
-        def drain_notifications(self, *, session_key="", owns_event=None):
-            calls.append((session_key, owns_event(event)))
+        def drain_notifications(
+            self, *, session_key="", owns_event=None, skip_async_delegation=False, skip_poll_observed=True
+        ):
+            calls.append(
+                (session_key, owns_event(event), skip_async_delegation)
+            )
+            # When skip_async_delegation is True, async_delegation events
+            # should be requeued and NOT returned — the dedicated watcher owns them.
+            if skip_async_delegation:
+                return []
             return [(event, "completion payload")]
 
     claimed = []
@@ -41,10 +49,12 @@ def test_cli_completion_drain_uses_visible_session_identity(monkeypatch):
 
     cli._drain_process_notifications("cli-idle")
 
-    assert calls == [("visible-session", True)]
-    assert cli._pending_input.get_nowait() == "completion payload"
-    assert claimed == [(event, "cli-idle")]
-    assert completed == [(event, "claim-token")]
+    # skip_async_delegation=True means the CLI idle drain skips async_delegation
+    # events, leaving them for the dedicated _async_delegation_watcher.
+    assert calls == [("visible-session", True, True)]
+    assert cli._pending_input.empty()
+    assert claimed == []
+    assert completed == []
 
 
 def test_cli_completion_ownership_rejects_foreign_session():

@@ -11953,6 +11953,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
         return source
 
+    def _get_fallback_session_source(self):
+        """Return the most recent cached session source as a fallback.
+
+        Used when the event's origin session has no routing metadata (e.g., CLI-
+        origin delegations). Routes completion notifications back through the
+        currently active gateway channel instead of dropping them silently.
+        """
+        from gateway.session import SessionSource
+
+        cached_sources = getattr(self, "_session_sources", None)
+        if not cached_sources:
+            return None
+        # OrderedDict — most recent is last
+        _, fallback = next(reversed(cached_sources.items()), (None, None))
+        if isinstance(fallback, SessionSource):
+            return fallback
+        return None
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -16810,6 +16828,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform_name = str(evt.get("platform") or derived_platform or "").strip().lower()
         chat_type = str(evt.get("chat_type") or derived_chat_type or "").strip().lower()
         chat_id = str(evt.get("chat_id") or derived_chat_id or "").strip()
+
+        # Fallback: if the origin is unroutable (e.g., CLI session with no
+        # platform/chat_id), try the most recent cached session source. This
+        # allows completion notifications from CLI-origin delegations to route
+        # back through the currently active gateway channel.
+        if not platform_name or not chat_type or not chat_id:
+            fallback_source = self._get_fallback_session_source()
+            if fallback_source is not None:
+                return fallback_source
+
         if not platform_name or not chat_type or not chat_id:
             logger.warning(
                 "Synthetic event source unresolvable: "

@@ -485,6 +485,20 @@ def dispatch_async_delegation(
     """
     delegation_id = _new_delegation_id()
     dispatched_at = time.time()
+
+    # Capture routing metadata at dispatch time so the completion event
+    # carries its own destination — avoids the "most recent cached source"
+    # race when multiple builders/architects delegate concurrently.
+    try:
+        from gateway.session_context import get_session_env
+        _platform = get_session_env("HERMES_SESSION_PLATFORM", "") or ""
+        _chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "") or ""
+        _chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or ""
+    except Exception:
+        _platform = ""
+        _chat_id = ""
+        _chat_type = ""
+
     record: Dict[str, Any] = {
         "delegation_id": delegation_id,
         "goal": goal,
@@ -495,6 +509,9 @@ def dispatch_async_delegation(
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
         "parent_session_id": parent_session_id,
+        "platform": _platform,
+        "chat_id": _chat_id,
+        "chat_type": _chat_type,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -615,6 +632,12 @@ def _push_completion_event(
         "session_key": record.get("session_key", ""),
         "origin_ui_session_id": record.get("origin_ui_session_id", ""),
         "parent_session_id": record.get("parent_session_id"),
+        # Routing metadata captured at dispatch time — each event carries its
+        # own destination, so concurrent builders/architects never misroute
+        # completions to the "most recent cached source".
+        "platform": record.get("platform", ""),
+        "chat_id": record.get("chat_id", ""),
+        "chat_type": record.get("chat_type", ""),
         "goal": record.get("goal", ""),
         "context": record.get("context"),
         "toolsets": record.get("toolsets"),
@@ -690,6 +713,18 @@ def dispatch_async_delegation_batch(
     combined_goal = (
         goals[0] if n == 1 else f"{n} parallel subagents: " + "; ".join(g[:40] for g in goals)
     )
+
+    # Capture routing metadata at dispatch time (same as single dispatch).
+    try:
+        from gateway.session_context import get_session_env
+        _platform = get_session_env("HERMES_SESSION_PLATFORM", "") or ""
+        _chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "") or ""
+        _chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or ""
+    except Exception:
+        _platform = ""
+        _chat_id = ""
+        _chat_type = ""
+
     record: Dict[str, Any] = {
         "delegation_id": delegation_id,
         "goal": combined_goal,
@@ -701,6 +736,9 @@ def dispatch_async_delegation_batch(
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
         "parent_session_id": parent_session_id,
+        "platform": _platform,
+        "chat_id": _chat_id,
+        "chat_type": _chat_type,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -801,6 +839,10 @@ def _finalize_batch(
         "session_key": event_record.get("session_key", ""),
         "origin_ui_session_id": event_record.get("origin_ui_session_id", ""),
         "parent_session_id": event_record.get("parent_session_id"),
+        # Routing metadata captured at dispatch time.
+        "platform": event_record.get("platform", ""),
+        "chat_id": event_record.get("chat_id", ""),
+        "chat_type": event_record.get("chat_type", ""),
         "goal": event_record.get("goal", ""),
         "goals": event_record.get("goals"),
         "context": event_record.get("context"),

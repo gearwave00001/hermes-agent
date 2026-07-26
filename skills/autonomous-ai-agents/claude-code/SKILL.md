@@ -771,7 +771,7 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
    Build the command:
    ```bash
    # Global subagent defaults (from subagent_routing.claude_code)
-   MAX_TURNS=$(hermes config get subagent_routing.claude_code.max_turns 2>/dev/null || echo 30)
+   MAX_TURNS=$(hermes config get subagent_routing.claude_code.max_turns 2>/dev/null || echo 50)
    ALLOWED_TOOLS=$(hermes config get subagent_routing.claude_code.allowed_tools 2>/dev/null || echo "Read,Write,Bash")
 
    # Build the command — only LLM_MODEL and ANTHROPIC_BASE_URL needed per-call
@@ -788,3 +788,52 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 8. **Report results to user** — after completion, summarize what Claude did and what changed
 9. **Don't kill slow sessions** — Claude may be doing multi-step work; check progress instead
 10. **Use `--allowedTools`** — restrict capabilities to what the task actually needs
+
+## Dispatching via Hermes delegate_task() (print mode)
+
+When using `delegate_task()` instead of direct `terminal()` calls, follow these steps:
+
+1. **Dispatch with explicit env overrides** — pass LLM_MODEL and ANTHROPIC_BASE_URL in the context field:
+   ```
+   context: "Send to .224: LLM_MODEL=..., ANTHROPIC_BASE_URL=http://192.168.1.224:5678. Use --allowedTools Read,Write,Bash,Grep,Edit,mcp__mnemosyne-claude__* and --max-turns 50."
+   ```
+
+2. **Start ONE loop-based watcher per subagent (mandatory)** — after dispatching, start a background terminal watcher with `notify_on_complete=True`:
+   ```python
+   terminal(
+       command='while ! grep -q "final.*end status=" /home/agent/.hermes/cache/delegation/live/<deleg_id>/task-0.log; do sleep 15; done; echo "SUBAGENT_DONE"',
+       background=True,
+       notify_on_complete=True
+   )
+   ```
+
+3. **Check completion BEFORE responding to user input** — when the user messages you, check pending subagents first:
+   ```python
+   terminal(command='grep -l "final.*end status=" /home/agent/.hermes/cache/delegation/live/deleg_*/task-0.log')
+   ```
+   If any completed, pull results from SQLite and surface them **before** answering the user's question. This way completions are never missed even during active conversation.
+
+4. **Then foreground wait if still pending** — after checking, if subagents are still running, block with a terminal call until done:
+   ```python
+   terminal(
+       command='while ! grep -q "final.*end status=" /home/agent/.hermes/cache/delegation/live/<deleg_id>/task-0.log; do sleep 15; done',
+       timeout=600
+   )
+   ```
+   This handles the case where they finish before you need to move on. If the user messages during the wait, it gets interrupted — but step 3 catches it on the next turn.
+
+4. **Report dispatch table** — show delegation_id, goal, server IP (e.g., `192.168.1.224`), model, and type at dispatch:
+   ```
+   | # | Delegation ID  | Server IP      | Model              | Type           | Status    |
+   |---|----------------|----------------|--------------------|----------------|-----------|
+   | 1 | deleg_abc12345 | 192.168.1.224  | Qwen3.6-27B-FP8    | Claude Code    | Running   |
+   ```
+
+5. **Virtiofs write persistence** — subagent edits DO persist to disk, but subagent self-verification (read-back) can show stale content due to virtiofs page cache. The authoritative check is always from the parent:
+   - Subagent applies edit → reports done (self-verify optional)
+   - Parent verifies externally via `cat`/`grep` after pulling results — this is the source of truth
+   - If parent verification fails, re-apply directly via `patch` tool
+
+6. **Surface results immediately** — after the wait completes, read the transcript's final assistant message and present the summary to the user.
+
+6. **Multiple subagents = multiple waits** — dispatch all subagents first (one watcher each), then wait for each one sequentially as you need its results.

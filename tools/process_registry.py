@@ -1169,6 +1169,7 @@ class ProcessRegistry:
         owns_event=None,
         *,
         skip_poll_observed: bool = True,
+        skip_async_delegation: bool = False,
     ) -> "list[tuple[dict, str]]":
         """Pop all pending notification events and return formatted pairs.
 
@@ -1213,6 +1214,9 @@ class ProcessRegistry:
             # they carry routing metadata. Ownerless ordinary events preserve
             # legacy single-session delivery.
             is_async_delegation = evt.get("type") == "async_delegation"
+            if skip_async_delegation and is_async_delegation:
+                requeue.append(evt)
+                continue
             evt_session_key = str(evt.get("session_key") or "")
             evt_origin_sid = str(evt.get("origin_ui_session_id") or "")
             requires_positive_proof = is_async_delegation or bool(
@@ -1240,6 +1244,8 @@ class ProcessRegistry:
             # session owns (or legacy ownerless ordinary events). Routing must
             # happen first so a foreign session cannot drop the owner's event.
             _evt_sid = evt.get("session_id", "")
+            _evt_type = evt.get("type", "completion")
+            _deleg_id = evt.get("delegation_id", evt.get("session_id", "?"))
             if evt.get("type") == "completion" and self._drain_should_skip(
                 _evt_sid, skip_poll_observed=skip_poll_observed
             ):

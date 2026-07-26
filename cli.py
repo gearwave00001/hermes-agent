@@ -9411,6 +9411,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         Delegations dispatched before context compression retain the original
         session key, so resolve that key to its continuation before comparing.
+        Also check if the event's session is an ancestor of the current session
+        (via parent_session_id chain) — child sessions inherit ownership of
+        delegations dispatched from their parents.
+
         Missing or foreign keys fail closed and remain queued for their owner.
         """
         event_key = str(event.get("session_key") or "")
@@ -9428,7 +9432,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             ) or event_key
         except Exception:
             resolved_key = event_key
-        return str(resolved_key) == current_key
+        if str(resolved_key) == current_key:
+            return True
+        # Also check if event_key is an ancestor of current_key (parent chain).
+        # Child sessions inherit ownership of delegations from their parents.
+        try:
+            session_db = getattr(self, "_session_db", None)
+            if session_db is not None:
+                cursor = current_key
+                for _ in range(32):  # depth cap
+                    row = session_db._conn.execute(
+                        "SELECT parent_session_id FROM sessions WHERE id = ?",
+                        (cursor,),
+                    ).fetchone()
+                    if row is None or not row[0]:
+                        break
+                    cursor = row[0]
+                    if cursor == event_key:
+                        return True
+        except Exception:
+            pass
+        return False
 
     def _drain_process_notifications(self, consumer: str) -> None:
         """Queue background notifications owned by this visible CLI session.
@@ -9448,6 +9472,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         for event, synthetic_message in process_registry.drain_notifications(
             session_key=session_key,
             owns_event=self._owns_process_notification,
+            skip_async_delegation=True,
         ):
             claim = claim_event_delivery(event, consumer)
             if claim is None:
@@ -14969,6 +14994,57 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         spinner_thread = threading.Thread(target=spinner_loop, daemon=True)
         spinner_thread.start()
+
+        # Async delegation watcher — dedicated background thread that polls for
+        # completed subagents and delivers them via _pending_input. Mirrors the
+        # gateway's _async_delegation_watcher so completions arrive promptly
+        # even during long agent turns (foreground waits, multi-step tool chains).
+        def _async_delegation_watcher():
+            import time as _time
+            from tools.process_registry import process_registry as _pr
+            from tools.async_delegation import (
+                claim_event_delivery,
+                complete_event_delivery,
+            )
+            from tools.process_registry import format_process_notification
+
+            while not self._should_exit:
+                try:
+                    requeue = []
+                    async_events = []
+                    while not _pr.completion_queue.empty():
+                        try:
+                            evt = _pr.completion_queue.get_nowait()
+                        except Exception:
+                            break
+                        if evt.get("type") == "async_delegation":
+                            async_events.append(evt)
+                        else:
+                            requeue.append(evt)
+                    for evt in requeue:
+                        _pr.completion_queue.put(evt)
+
+                    session_key = getattr(self, "session_id", "") or ""
+                    for evt in async_events:
+                        synth_text = format_process_notification(evt)
+                        if not synth_text:
+                            continue
+                        # Claim and deliver — ownership is handled by claim_event_delivery
+                        # (atomic SQLite claim prevents double delivery). No session_key
+                        # filter needed; the completion_queue is shared and events are
+                        # claimed atomically, so only one consumer wins.
+                        claim = claim_event_delivery(evt, "cli-async-watcher")
+                        if claim is None:
+                            continue
+                        self._pending_input.put(synth_text)
+                        complete_event_delivery(evt, claim)
+                except Exception as e:
+                    logger.warning("Async delegation watcher error: %s", e, exc_info=True)
+                _time.sleep(2.0)
+
+        watcher_thread = threading.Thread(target=_async_delegation_watcher, daemon=True)
+        watcher_thread.start()
+        logger.info("CLI async delegation watcher started (pid=%d)", os.getpid())
         
         # Background thread to process inputs and run agent
         def process_loop():
