@@ -17093,9 +17093,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _pr.completion_queue.put(evt)
                 for evt in async_events:
                     self._enrich_async_delegation_routing(evt)
+                    # Deliver FIRST — before formatting — so events that fail
+                    # format still get a claim attempt and requeue if needed.
+                    # Without this, a _format_gateway_process_notification
+                    # returning None causes the watcher to skip without any
+                    # delivery attempt, leaving the event lost from async_events
+                    # (already popped from completion_queue) until the next poll
+                    # cycle picks it up again (#delivery-bug).
                     synth_text = _format_gateway_process_notification(evt)
-                    if not synth_text:
-                        continue
                     try:
                         delivered = await self._deliver_completion_notification(synth_text, evt)
                         if delivered is False:

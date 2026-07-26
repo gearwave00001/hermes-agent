@@ -15026,15 +15026,22 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
                     session_key = getattr(self, "session_id", "") or ""
                     for evt in async_events:
-                        synth_text = format_process_notification(evt)
-                        if not synth_text:
-                            continue
-                        # Claim and deliver — ownership is handled by claim_event_delivery
-                        # (atomic SQLite claim prevents double delivery). No session_key
-                        # filter needed; the completion_queue is shared and events are
-                        # claimed atomically, so only one consumer wins.
+                        # Claim FIRST — before formatting — so even unformatable
+                        # events get delivery_attempts incremented and don't sit
+                        # pending forever. Without this, a format_process_notification
+                        # returning None causes the watcher to skip without claiming,
+                        # leaving delivery_attempts=0 and the event undeliverable
+                        # during this process lifetime (#delivery-bug).
                         claim = claim_event_delivery(evt, "cli-async-watcher")
                         if claim is None:
+                            # Another consumer claimed it — requeue so that consumer
+                            # can see it on their next poll cycle. Without requeuing,
+                            # the event is lost from async_events and never delivered.
+                            _pr.completion_queue.put(evt)
+                            continue
+                        synth_text = format_process_notification(evt)
+                        if not synth_text:
+                            complete_event_delivery(evt, claim)
                             continue
                         self._pending_input.put(synth_text)
                         complete_event_delivery(evt, claim)
