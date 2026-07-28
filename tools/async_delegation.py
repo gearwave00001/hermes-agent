@@ -77,6 +77,10 @@ _DEFAULT_MAX_ASYNC_CHILDREN = 3
 _MAX_RETAINED_COMPLETED = 50
 _DURABLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _MAX_DURABLE_PENDING = 1000
+# Stop requeuing after this many delivery attempts. An unroutable event
+# (e.g., CLI-origin with no cached gateway fallback) would otherwise cycle
+# forever. ~50 retries at 5s intervals ≈ 4 minutes of attempts before giving up.
+_MAX_DELIVERY_ATTEMPTS = 50
 _DB_LOCK = threading.Lock()
 
 
@@ -342,6 +346,25 @@ def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
                WHERE delegation_id=? AND delivery_state='pending'
                  AND delivery_claim=?""",
             (time.time(), delegation_id, claim_id),
+        )
+        return cur.rowcount == 1
+
+
+def give_up_completion_delivery(delegation_id: str) -> bool:
+    """Give up on delivery after too many failed attempts.
+
+    Marks the record as 'failed' so it stops cycling through the queue.
+    The record remains queryable via get_durable_delegation() for debugging.
+    Returns True if the state was changed to 'failed'.
+    """
+    now = time.time()
+    with _DB_LOCK, _connect() as conn:
+        cur = conn.execute(
+            """UPDATE async_delegations SET delivery_state='failed',
+                      delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
+               WHERE delegation_id=? AND delivery_state='pending'
+                 AND delivery_attempts >= ?""",
+            (now, delegation_id, _MAX_DELIVERY_ATTEMPTS),
         )
         return cur.rowcount == 1
 

@@ -15057,6 +15057,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         if not complete_event_delivery(evt, claim):
                             _pr.completion_queue.put(evt)
                             continue
+                        # Push to _pending_input so process_loop consumes it as the
+                        # next agent turn. Do NOT also push to _pending_completions
+                        # for async_delegation events — the idle poller would print
+                        # raw text and cause a duplicate (user sees both the raw
+                        # notification AND it in the agent's next response).
                         self._pending_input.put(synth_text)
                 except Exception as e:
                     logger.warning("Async delegation watcher error: %s", e, exc_info=True)
@@ -15065,7 +15070,37 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         watcher_thread = threading.Thread(target=_async_delegation_watcher, daemon=True)
         watcher_thread.start()
         logger.info("CLI async delegation watcher started (pid=%d)", os.getpid())
-        
+
+        # Dedicated queue for idle completion display — separate from _pending_input
+        # so the poller never steals goal continuations or user messages meant for
+        # process_loop. The async watcher pushes formatted completions here; the
+        # idle poller drains and prints them when the agent is between turns.
+        self._pending_completions = queue.Queue()
+
+        def _idle_completion_poller():
+            import time as _time
+            while not self._should_exit:
+                try:
+                    if not self._agent_running and self._pending_input.empty():
+                        # Only print when process_loop isn't about to start a new
+                        # turn. The async watcher pushes completions to BOTH
+                        # _pending_input and _pending_completions; if _pending_input
+                        # already has items, process_loop will consume them as the
+                        # next agent turn and we should NOT also print raw text.
+                        while not self._pending_completions.empty():
+                            try:
+                                msg = self._pending_completions.get_nowait()
+                            except Exception:
+                                break
+                            if msg:
+                                _cprint(msg)
+                except Exception as e:
+                    logger.debug("Idle completion poller error: %s", e)
+                _time.sleep(3.0)
+
+        poller_thread = threading.Thread(target=_idle_completion_poller, daemon=True)
+        poller_thread.start()
+
         # Background thread to process inputs and run agent
         def process_loop():
             while not self._should_exit:

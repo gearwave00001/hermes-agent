@@ -17106,10 +17106,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if delivered is False:
                             _pr.completion_queue.put(evt)
                         elif delivered is None:
-                            # No route found (e.g., CLI-origin event with no cached
-                            # fallback). Requeue so the next poll cycle can retry —
-                            # a gateway session may arrive before the event times out.
-                            _pr.completion_queue.put(evt)
+                            # No route found. Check if we've exhausted delivery attempts
+                            # before requeuing — prevents infinite loops for unroutable events.
+                            delegation_id = str(evt.get("delegation_id") or "")
+                            gave_up = False
+                            try:
+                                from tools.async_delegation import give_up_completion_delivery
+                                gave_up = give_up_completion_delivery(delegation_id)
+                            except Exception:
+                                pass
+                            if not gave_up:
+                                _pr.completion_queue.put(evt)
+                            elif gave_up:
+                                logger.debug(
+                                    "Gave up delivering async delegation %s after max attempts",
+                                    delegation_id,
+                                )
                     except Exception as e:
                         _pr.completion_queue.put(evt)
                         logger.error("Async delegation injection error: %s", e)
