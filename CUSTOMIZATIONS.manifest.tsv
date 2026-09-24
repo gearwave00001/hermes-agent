@@ -1,0 +1,41 @@
+# Hermes local-customization manifest — generated pre-upstream-merge
+merge_base: 67e73ae9
+head: 2bdd0decd201bc10490f5ba28c86ab2d23075e98
+generated_for_commit_subject: delegation updates
+# format: <status>	<path>	<pre_merge_blob_sha>
+M	cli-config.yaml.example	81530671cc3f83fa17d27f183f63ade0d0ef0525
+M	cli.py	d332cd4902ff967da032acc646e15741382235c1
+A	docker/sandbox-start.sh	5e1e4e7b89c5fb065cdfd47098a840d1bf7bd338
+M	gateway/run.py	455a0b4a8ecee38cb70349f9e0d75c95b2ee5560
+M	hermes_cli/config.py	d7dddf8961fb9a0d7b985a2ae6ef86e0cb6f6d1c
+M	hermes_cli/model_switch.py	9476f6c01c49b68d27d7de21f64172b704bee7d7
+M	skills/autonomous-ai-agents/claude-code/SKILL.md	2815aed265bd080905c6758e91ea70a5870cd00e
+M	skills/autonomous-ai-agents/hermes-agent/SKILL.md	8bada2f8fbe333f59d7563e61cb26895741243cc
+A	skills/autonomous-ai-agents/mcp-clis/SKILL.md	e055113571aec82ff006837271840cf7ec468e10
+A	skills/autonomous-ai-agents/mcp-clis/references/curl-discovery.md	f691db52fff3bf1508183e6d2551a812e78b74f6
+A	skills/bookmarks/SKILL.md	976f8e445f15c8fb73e14b042b18f5301cf4cc01
+A	skills/bookmarks/bookmarks/SKILL.md	7c9a61b58b6da837a1a09b1ed3a2a5518e8d9c2a
+A	skills/bookmarks/bookmarks/scripts/bookmarks.py	44e7572f9a6316613150fe73af33074b5cbc0fb9
+A	skills/bookmarks/references/setup.md	265e6f3d4aee79d4301522cdcebba5788575fb29
+A	skills/bookmarks/scripts/bookmarks.py	44e7572f9a6316613150fe73af33074b5cbc0fb9
+A	skills/delegation/delegation-routing/SKILL.md	22402f92d59d0626611c643346c5d11fe2ab8c73
+A	skills/delegation/delegation-routing/references/completion-drain-path.md	2aaa5ca211e9f7a55ef9bf21c6f2fa82e446a2a0
+A	skills/delegation/delegation-routing/references/dispatcher-death-6-parallel-fix.md	f21e9c6cefe0c6e0e3e52f9db9d6cdd33b69bddb
+A	skills/delegation/delegation-routing/references/toctou-race-fix.md	b320795d6c17a759b2ab02a1eb4538a0bb0b38ab
+A	skills/delegation/parallel-research-delegation/SKILL.md	d974f2e6973df8932ba5d8f9ac1eda297b3fae78
+A	skills/delegation/parallel-research-delegation/references/beer-research-example.md	9d7acab8e97eb777630cdba4f5a95f357b1783e8
+A	skills/delegation/parallel-research-delegation/references/moa-and-background-fanout.md	a204ce72f241446b8d9c0a68711ce1c0cdcf09aa
+A	skills/delegation/subagent-delegation/SKILL.md	41798713e4d67442c9fec658cb855fbc6dc8a2b4
+A	skills/delegation/subagent-delegation/references/queue-stall-detection.md	09cab9cb74b887b3d1472a45f593ddfad71a89d6
+M	tests/cli/test_cli_async_delegation_delivery.py	e7bee38dcfb6415e635cc0fa1517fe11b6ef285a
+A	tests/memory/test_mnemosyne.py	4b1edeb2c061774ce202a0a7ffeec891901496d1
+A	tests/tools/test_mcp_tool_delay.py	946513fff835bdf6679cc704d7367dfc5bda9259
+M	tests/tools/test_process_registry.py	749e91453c6b89c1daf30beedeb0f5862298cfa4
+A	tests/tools/test_subagent_router.py	5e2e39269c72c2a0a1f4f21f016abc37e813a66e
+A	tests/tools/test_subagent_router_deadlock.py	0b9ce7b915b8ee0225cfbd628334e3728ae40d9e
+M	tools/async_delegation.py	89f35e8e49c4eb0bc2f1f8b9e47b13b056f99449
+M	tools/delegate_tool.py	4be71e4539898bbb212196f964c15d7a9fccc096
+M	tools/mcp_tool.py	f456ff77318ef014d464bc6f3293407c17ae5a7e
+M	tools/process_registry.py	3fdd83a5c85d2ce1b60b5de65c68b69348c74b72
+A	tools/subagent_router.py	7069d25e089cc050554c78ea6badc2d5d6261190
+M	tui_gateway/server.py	e8b3b3d706b190045a907e5fa3dc448abb296e2c
