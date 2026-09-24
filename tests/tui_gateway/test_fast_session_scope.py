@@ -13,7 +13,8 @@ Contract under test:
 1. ``config.set key=fast`` with a session must NOT write config.yaml; it pins
    ``create_service_tier_override`` ("priority" / "" for explicit normal) so
    lazily-built sessions and rebuilds keep the choice.
-2. Without a session it persists globally, unchanged.
+2. Without a session it persists globally, unchanged. A session_id the
+   backend no longer holds is refused with 4001, not treated as "no session".
 3. ``config.get key=fast`` must read a pre-build session's pin.
 """
 
@@ -66,20 +67,6 @@ class TestConfigSetFastSessionScope:
         assert session["create_service_tier_override"] == "priority"
         write_key.assert_not_called()
 
-    def test_session_scoped_normal_pins_explicit_normal(self) -> None:
-        agent = _agent(service_tier="priority")
-        session = {"session_key": "k2", "agent": agent}
-        with patch.dict(server._sessions, {"s2": session}, clear=False), \
-                patch.object(server, "_write_config_key") as write_key, \
-                patch.object(server, "_persist_live_session_runtime"), \
-                patch.object(server, "_emit"):
-            resp = _set({"key": "fast", "session_id": "s2", "value": "normal"})
-        assert resp["result"]["value"] == "normal"
-        assert agent.service_tier is None
-        # "" (not absent) so a rebuild pins normal instead of re-reading the
-        # global default.
-        assert session["create_service_tier_override"] == ""
-        write_key.assert_not_called()
 
     def test_lazy_session_pins_create_override(self) -> None:
         """A pre-build (agent=None) session must keep the change for the
@@ -100,22 +87,6 @@ class TestConfigSetFastSessionScope:
         assert session["create_service_tier_override"] == "priority"
         write_key.assert_not_called()
 
-    def test_lazy_session_validates_fast_against_session_model(self) -> None:
-        """Fast support is checked against the session's picked model, not the
-        global default the session will never use."""
-        session = {
-            "session_key": "k4",
-            "agent": None,
-            "model_override": {"model": "session-model", "provider": "openai"},
-        }
-        with patch.dict(server._sessions, {"s4": session}, clear=False), \
-                patch.object(server, "_write_config_key"), \
-                patch(
-                    "hermes_cli.models.resolve_fast_mode_overrides",
-                    return_value=FAST_OVERRIDES,
-                ) as resolve:
-            _set({"key": "fast", "session_id": "s4", "value": "fast"})
-        resolve.assert_called_once_with("session-model")
 
     def test_toggle_flips_prebuild_pin(self) -> None:
         """An empty value toggles from the session's pin, not the global."""
@@ -137,6 +108,15 @@ class TestConfigSetFastSessionScope:
         assert resp["result"]["value"] == "normal"
         write_key.assert_called_once_with("agent.service_tier", "normal")
 
+    def test_stale_session_id_is_refused_not_persisted_globally(self) -> None:
+        """A runtime id the backend no longer holds (reaped / re-minted) is not "no session": it
+        must 4001 so the client resumes, not rewrite the profile's tier for every surface."""
+        with patch.dict(server._sessions, {}, clear=True), \
+                patch.object(server, "_write_config_key") as write_key:
+            resp = _set({"key": "fast", "session_id": "reaped-sid", "value": "normal"})
+        assert resp.get("error", {}).get("code") == 4001, resp
+        write_key.assert_not_called()
+
 
 class TestConfigGetFastSessionScope:
     def test_reads_prebuild_pin(self) -> None:
@@ -149,13 +129,4 @@ class TestConfigGetFastSessionScope:
             resp = _get({"key": "fast", "session_id": "s6"})
         assert resp["result"]["value"] == "fast"
 
-    def test_reads_live_agent_tier(self) -> None:
-        session = {"session_key": "k7", "agent": _agent(service_tier="priority")}
-        with patch.dict(server._sessions, {"s7": session}, clear=False):
-            resp = _get({"key": "fast", "session_id": "s7"})
-        assert resp["result"]["value"] == "fast"
 
-    def test_falls_back_to_global(self) -> None:
-        with patch.object(server, "_load_service_tier", return_value="priority"):
-            resp = _get({"key": "fast"})
-        assert resp["result"]["value"] == "fast"

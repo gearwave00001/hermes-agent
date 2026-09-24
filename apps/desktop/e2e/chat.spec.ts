@@ -8,13 +8,10 @@
  * Prerequisite: `npm run build` must have been run so dist/ exists.
  */
 
-import { test } from '@playwright/test'
+import { expect, test } from './test'
 
-import {
-  type MockBackendFixture,
-  setupMockBackend,
-  waitForAppReady,
-} from './fixtures'
+import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
+import { BLOCKING_CLARIFY_QUESTION, BLOCKING_CLARIFY_TRIGGER } from '../../../tests-js/scripts/mock-server'
 import { expectVisualSnapshot } from './visual-snapshot'
 
 let fixture: MockBackendFixture | null = null
@@ -61,7 +58,7 @@ test.describe('chat interaction with mock backend', () => {
         return (body.textContent ?? '').includes('Hello, can you hear me?')
       },
       undefined,
-      { timeout: 15_000 },
+      { timeout: 15_000 }
     )
 
     // Wait for the mock response to appear. The canned reply is:
@@ -81,11 +78,44 @@ test.describe('chat interaction with mock backend', () => {
         return text.includes('mock inference server') || text.includes('boot chain is working')
       },
       undefined,
-      { timeout: 60_000 },
+      { timeout: 60_000 }
     )
   })
 
   test('screenshot of chat with messages', async () => {
     await expectVisualSnapshot(fixture!.page, { name: 'chat-with-messages', app: fixture!.app })
+  })
+
+  test('offers stop, steer, and queue actions while busy', async ({}, testInfo) => {
+    const page = fixture!.page
+    const composer = page.locator('[contenteditable="true"]').first()
+    const primary = page.locator('[data-slot="composer-root"] button[type="submit"]')
+    const queue = page.locator('[data-slot="composer-root"] button[aria-label="Queue message"]')
+
+    await composer.click()
+    await composer.type(BLOCKING_CLARIFY_TRIGGER)
+    await page.keyboard.press('Enter')
+    await page.getByText(BLOCKING_CLARIFY_QUESTION).waitFor({ state: 'visible', timeout: 30_000 })
+
+    await expect(primary).toHaveAttribute('aria-label', 'Stop')
+
+    await composer.click()
+    await composer.type('please answer tersely')
+    // Since "running is not busy" (3bc52fb9df) the primary keeps the Send
+    // affordance mid-turn — steer is routed through the submit engine, not a
+    // separate labeled button. Queue remains the explicit secondary action.
+    await expect(primary).toHaveAttribute('aria-label', 'Send')
+    await expect(queue).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('busy-composer-steer.png') })
+
+    await queue.click()
+    await expect(primary).toHaveAttribute('aria-label', 'Stop')
+    await expect(queue).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('busy-composer-queue.png') })
+    await expect(page.getByText('1 Queued')).toBeVisible()
+
+    await primary.click()
+    await expect(page.getByText('1 Queued — paused')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('busy-composer-queue-paused.png') })
   })
 })
