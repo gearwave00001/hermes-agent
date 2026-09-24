@@ -450,7 +450,6 @@ def _build_children(
                 "override_api_key": child_creds.get("api_key"),
                 "override_api_mode": child_creds.get("api_mode"),
                 "override_request_overrides": child_creds.get("request_overrides"),
-                "override_max_tokens": child_creds.get("max_output_tokens"),
                 "override_acp_command": child_creds.get("command"),
                 "override_acp_args": child_creds.get("args"),
             })
