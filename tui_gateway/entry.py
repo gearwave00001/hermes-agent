@@ -283,6 +283,16 @@ def main():
         except Exception:
             logger.warning("%s failed", what, exc_info=True)
 
+    # External subagent observer: unix socket that out-of-process launchers (agent-team
+    # Claude Code dispatches) use to register their headless children into the live
+    # registry. Opt-in (delegation.external_subagent_registry); fail-open either way.
+    try:
+        from tools import subagent_external
+        if subagent_external.is_enabled():
+            subagent_external.start_observer()
+    except Exception:
+        logger.debug("external subagent observer start failed", exc_info=True)
+
     # Backgrounded so a dead MCP server can't freeze startup; _make_agent briefly joins it.
     ensure_mcp_discovery_started()
 

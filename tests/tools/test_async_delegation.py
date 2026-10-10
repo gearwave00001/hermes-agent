@@ -832,6 +832,77 @@ def _patch_delegation_cfg(monkeypatch, model="upstage/solar-pro-4", provider="op
     )
 
 
+def test_batch_preamble_shows_acquired_model_not_dispatch_fallback():
+    """The batch-complete header must show the model each child ACTUALLY ran on
+    (resolved at build time by subagent priority routing), not the dispatch-time
+    configured fallback stored on the event. Regression: after pinning tasks to a
+    custom vLLM provider, the banner printed the configured delegation.model while
+    every per-task row showed the acquired model."""
+    evt = _make_async_evt(
+        is_batch=True,
+        model="configured-fallback-model",
+        goals=["task a", "task b"],
+        results=[
+            {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done a",
+                "api_calls": 3,
+                "duration_seconds": 10.0,
+                "exit_reason": "completed",
+                "truncated": False,
+                "model": "acquired-model-x",
+                "provider": "192.168.1.227",
+            },
+            {
+                "task_index": 1,
+                "status": "completed",
+                "summary": "done b",
+                "api_calls": 4,
+                "duration_seconds": 12.0,
+                "exit_reason": "completed",
+                "truncated": False,
+                "model": "acquired-model-x",
+                "provider": "192.168.1.227",
+            },
+        ],
+    )
+    text = format_process_notification(evt)
+    assert text is not None
+    # The Role/Model preamble line carries the acquired model...
+    preamble_line = next(l for l in text.splitlines() if l.startswith("Role:"))
+    assert "acquired-model-x" in preamble_line
+    # ...and never the stale dispatch-time fallback.
+    assert "configured-fallback-model" not in preamble_line
+    # Per-task rows agree with the header (they always did).
+    assert "acquired-model-x" in text.split("Subagent routing summary:")[-1]
+
+
+def test_batch_preamble_falls_back_to_event_model_when_results_lack_it():
+    """Pre-build failures carry no per-task model; the header then falls back to
+    the event's configured model rather than printing '?' or nothing."""
+    evt = _make_async_evt(
+        is_batch=True,
+        model="configured-fallback-model",
+        goals=["task a"],
+        results=[
+            {
+                "task_index": 0,
+                "status": "failed",
+                "error": "build failed before model resolution",
+                "api_calls": 0,
+                "duration_seconds": 0.5,
+                "exit_reason": "error",
+                "truncated": False,
+            },
+        ],
+    )
+    text = format_process_notification(evt)
+    assert text is not None
+    preamble_line = next(l for l in text.splitlines() if l.startswith("Role:"))
+    assert "configured-fallback-model" in preamble_line
+
+
 def test_batch_model_rejection_notice_prepended(monkeypatch):
     """A rejected delegation model must surface ONE config-level notice above
     the per-task blocks instead of staying buried in each summary (#97654)."""

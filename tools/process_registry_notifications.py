@@ -152,8 +152,18 @@ def _preamble(evt: dict, title: str, intro: str, completed_at: float, *, with_go
         lines.append(f"Context you provided: {evt['context']}")
     if evt.get("toolsets"):
         lines.append(f"Toolsets: {', '.join(evt['toolsets'])}")
+    # The header must show what ACTUALLY ran, not the dispatch-time fallback: batch
+    # events carry the configured delegation.model (evt["model"]), but each child
+    # resolves its own provider/model at build time (subagent priority routing), so
+    # prefer the acquired per-task models. Single delegations already carry the
+    # resolved model on the event; results without a model (pre-build failures) fall
+    # back to the configured value.
+    _raw_results = evt.get("results")
+    _results = _raw_results if isinstance(_raw_results, list) else []
+    _acquired = sorted({str(r.get("model")) for r in _results if isinstance(r, dict) and r.get("model")})
+    _model = (", ".join(_acquired) if _acquired else None) or evt.get("model") or "?"
     _provider = evt.get("provider")
-    model_line = f"Role: {evt.get('role') or 'leaf'}   Model: {evt.get('model') or '?'}"
+    model_line = f"Role: {evt.get('role') or 'leaf'}   Model: {_model}"
     if _provider and str(_provider) not in ("?", ""):
         model_line += f"   Provider: {_provider}"
     lines.append(model_line)

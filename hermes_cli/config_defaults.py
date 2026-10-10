@@ -1372,6 +1372,13 @@ DEFAULT_CONFIG = {
         # notifications to the PARENT; false suppresses them (the child's result is the
         # deliverable). Async-delegation results are NEVER suppressed.
         "surface_child_process_notifications": False,
+        # Opt-in live registry for subagents launched OUTSIDE delegate_task (e.g. agent-team
+        # Claude Code runs via scripts/dispatch-claude-subagent.py). When true, the gateway
+        # process listens on a unix socket (~/.hermes/cache/subagent_obs.sock) and merges
+        # externally-registered children into list_active_subagents() — visible in the ctrl+t
+        # agents overlay and delegation.status RPC, tagged kind="external". Off by default:
+        # no behavior change for users who don't run external headless subagents.
+        "external_subagent_registry": False,
     },
 
     # Subagent routing overrides — per-tool defaults for delegated subagents.

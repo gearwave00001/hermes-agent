@@ -172,9 +172,19 @@ _PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport"
 
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Copy of the running subagent tree ({subagent_id, parent_id, depth, goal, model,
-    started_at, tool_count, status, ...}); safe from any thread."""
+    started_at, tool_count, status, ...}); safe from any thread. When the external
+    subagent registry is enabled (``delegation.external_subagent_registry``), records
+    registered by out-of-process launchers (e.g. agent-team Claude Code runs) are merged
+    in and tagged ``kind="external"``."""
     with _active_subagents_lock:
-        return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
+        records = [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
+    try:
+        from tools import subagent_external
+        if subagent_external.is_enabled():
+            return subagent_external.merge_external_into(records)
+    except Exception:
+        pass
+    return records
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:
     """True when *child_agent* sits below *parent_agent* in the spawn tree (walks the ``_delegate_parent_ref`` weakref
