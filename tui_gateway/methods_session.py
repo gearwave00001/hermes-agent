@@ -331,8 +331,9 @@ def _create_overrides(params: dict) -> tuple:
     return model_override, reasoning_override, service_tier_override
 
 
-@method("session.create")
-def _(rid, params: dict) -> dict:
+def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> dict:
+    """``session.create``; ``copy_parent_history`` (``session.branch_stored``) reads the parent's
+    transcript server-side and omits it from the reply."""
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
     # Reject an incoherent model×provider pair BEFORE any state exists: minting it only defers the
@@ -340,10 +341,65 @@ def _(rid, params: dict) -> dict:
     from .methods_session_model_guard import model_override_conflict
     if conflict := model_override_conflict(params, _profile_build_scope(profile_home)):
         return _err(rid, -32602, conflict.pop("message"), conflict)
+    # Idempotency: a client retrying a create whose first response was lost
+    # should get back the SAME session, not a fresh one (which would leave a
+    # duplicate child). The caller supplies a stable key per logical create.
+    idem_key = _str_param(params, "idempotency_key") or None
+    if idem_key is not None:
+        with _sessions_lock:
+            # Drop expired entries while we're here.
+            now_for_gc = time.time()
+            expired = [k for k, (_, ts) in _idempotency_keys.items() if now_for_gc - ts > _IDEMPOTENCY_KEY_TTL]
+            for k in expired:
+                _idempotency_keys.pop(k, None)
+            existing = _idempotency_keys.get(idem_key)
+            if existing is not None:
+                existing_sid, _ = existing
+                session = _sessions.get(existing_sid)
+                if session is not None:
+                    # Refresh the TTL so back-to-back retries don't age out mid-flight.
+                    _idempotency_keys[idem_key] = (existing_sid, now_for_gc)
+                    history = session["history"]
+                    override = session.get("model_override") or {}
+                    # Same result shape as the fresh-create path below: branch_stored
+                    # (copy_parent_history) answers messages_omitted and NEVER puts the
+                    # copied transcript on the wire — its result contract forbids
+                    # ``messages``, and serializing the parent's history through the
+                    # renderer is exactly what the method exists to avoid.
+                    return _ok(rid, {
+                        "session_id": existing_sid, "stored_session_id": session["session_key"],
+                        "message_count": len(history),
+                        **({"messages_omitted": True} if copy_parent_history
+                           else {"messages": _history_to_messages(history, profile_home=session.get("profile_home"))}),
+                        "info": {"model": override.get("model") if override else _session_default_model(session),
+                                 **({"provider": override["provider"]} if override.get("provider") else {}),
+                                 "tools": {}, "skills": {}, "cwd": session["cwd"], "branch": git_probe.branch(session["cwd"]),
+                                 "project": _project_info_for_cwd(session["cwd"]), "lazy": True,
+                                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+                                 "profile_name": _response_profile_name(profile)}})
+                # The session was closed between the original create and the retry —
+                # fall through and create a fresh one under the same key.
+                _idempotency_keys.pop(idem_key, None)
     (sid, source), key = _new_runtime_ids(params), _new_session_key()
     history = _coerce_seed_history(params.get("messages"))
     # Branch: links back so list_sessions_rich keeps it visible and the sidebar nests it.
     parent_session_id = _str_param(params, "parent_session_id") or None
+    if copy_parent_history:
+        if not parent_session_id:
+            return _err(rid, 4008, "parent_session_id is required when copying parent history")
+        # Whole-session desktop branches must not serialize the parent's transcript
+        # through the renderer. Read the durable display projection here, where the
+        # owning state.db already lives, and keep the full copy server-side.
+        with _profile_db(params) as db:
+            if db is None:
+                return _db_unavailable_error(rid, code=5008)
+            try:
+                _, display_history = db.get_resume_conversations(parent_session_id)
+            except Exception as exc:
+                return _err(rid, 4008, f"nothing to branch — {exc}")
+        history = _visible_branch_history(display_history)
+        if not history:
+            return _err(rid, 4008, "nothing to branch — send a message first")
     # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback is "No workspace".
     explicit_cwd = False
     raw_cwd = _str_param(params, "cwd")  # unguarded, as on BASE: only the path check is best-effort
@@ -401,13 +457,26 @@ def _(rid, params: dict) -> dict:
     override = session_model_override or {}
     messages = _history_to_messages(history, profile_home=profile_home)  # hidden seed rows are not on the wire; count what is (as resume does)
     return _ok(rid, {
-        "session_id": sid, "stored_session_id": key, "message_count": len(messages), "messages": messages,
+        "session_id": sid, "stored_session_id": key, "message_count": len(messages),
+        **({"messages_omitted": True} if copy_parent_history else {"messages": messages}),
         # Reflect the override now so the client doesn't clobber its sticky pick.
         "info": {"model": override.get("model") if override else _session_default_model(_sessions[sid]),
                  **({"provider": override["provider"]} if override.get("provider") else {}),
                  "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
+
+
+@method("session.create")
+def _(rid, params: dict) -> dict:
+    return _create_session(rid, params)
+
+
+@method("session.branch_stored")
+def _(rid, params: dict) -> dict:
+    """Whole-session branch of a stored parent without routing its transcript through the client
+    (a distinct method so an older gateway answers "unknown method" instead of an empty branch)."""
+    return _create_session(rid, params, copy_parent_history=True)
 
 
 def _unarchive_recoverable(db, session_id: str) -> bool:
@@ -2012,6 +2081,10 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
         if new_sid in _sessions:
             _sessions[new_sid]["active_session_lease"] = None  # claimed lazily on the first turn
             _sessions[new_sid]["auth_user_id"] = parent_user_id
+            # The parent's STORED key: the idempotent-hit reply for a retried
+            # session.branch answers the same ``parent`` as the fresh path, and
+            # later readers (lineage, retry) get the linkage from the runtime.
+            _sessions[new_sid]["parent_session_id"] = session.get("session_key")
         return agent
     finally:
         if branch_owns_db and branch_db is not None:
@@ -2044,8 +2117,22 @@ def _branch_source_history(db, session: dict, old_key: str) -> list:
     return history or _visible_branch_history(in_memory_history)
 
 
-@_session_method("session.branch", live=True)
-def _(rid, params: dict, session: dict) -> dict:
+def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = False) -> dict:
+    # Idempotency (#65410, same registry as session.create): a client retrying a
+    # branch whose first response was lost gets the SAME child, not a duplicate.
+    idem_key = _str_param(params, "idempotency_key") or None
+    if idem_key is not None:
+        with _sessions_lock:
+            now_gc = time.time()
+            existing_sid, ts = _idempotency_keys.get(idem_key, (None, 0.0))
+            if existing_sid is not None and existing_sid in _sessions:
+                if now_gc - ts <= _IDEMPOTENCY_KEY_TTL:
+                    # Refresh the TTL so back-to-back retries don't age out mid-flight.
+                    _idempotency_keys[idem_key] = (existing_sid, now_gc)
+                    return _ok(rid, _branch_idempotent_hit(existing_sid, _sessions[existing_sid], omit_messages))
+                _idempotency_keys.pop(idem_key, None)
+            # Stale key (child closed) or first attempt: fall through to a fresh
+            # branch, which re-registers the key below.
     # Write into the parent's profile-scoped state.db; the launch handle would orphan rows.
     with _session_db(session) as db:
         if db is None:
@@ -2071,9 +2158,55 @@ def _(rid, params: dict, session: dict) -> dict:
         agent = _build_branch_agent(session, new_sid, new_key, history, source)
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "stored_session_id": new_key, "title": title, "parent": old_key,
-                     "message_count": len(history), "messages": _history_to_messages(history, profile_home=session.get("profile_home")),
-                     "info": _session_info(agent, _sessions.get(new_sid))})
+    if idem_key is not None:
+        with _sessions_lock:
+            _idempotency_keys[idem_key] = (new_sid, time.time())
+            # The fresh reply's title, so an idempotent hit answers the SAME one
+            # without a DB round-trip.
+            if new_sid in _sessions:
+                _sessions[new_sid]["branch_title"] = title
+    response = {"session_id": new_sid, "stored_session_id": new_key, "title": title, "parent": old_key,
+                "message_count": len(history), "info": _session_info(agent, _sessions.get(new_sid))}
+    if omit_messages:
+        response["messages_omitted"] = True
+    else:
+        response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
+    return _ok(rid, response)
+
+
+def _branch_idempotent_hit(existing_sid: str, session: dict, omit_messages: bool) -> dict:
+    """The SAME result shape a fresh ``_branch_live`` returns for the existing child."""
+    history = session.get("history") or []
+    key = session.get("session_key") or ""
+    response = {"session_id": existing_sid, "stored_session_id": key,
+                "title": session.get("branch_title") or _branch_title_for(session),
+                "parent": session.get("parent_session_id"), "message_count": len(history),
+                "info": _fallback_session_info(session)}
+    if omit_messages:
+        response["messages_omitted"] = True
+    else:
+        response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
+    return response
+
+
+def _branch_title_for(session: dict) -> str:
+    """The child's persisted title from its stored row, best-effort."""
+    with contextlib.suppress(Exception):
+        with _session_db(session) as db:
+            if db is not None:
+                return db.get_session_title(session.get("session_key") or "") or ""
+    return ""
+
+
+@_session_method("session.branch", live=True)
+def _(rid, params: dict, session: dict) -> dict:
+    return _branch_live(rid, params, session)
+
+
+@_session_method("session.branch_whole", live=True)
+def _(rid, params: dict, session: dict) -> dict:
+    """Whole-history ``session.branch`` that doesn't echo the copied transcript back."""
+    return _branch_live(rid, params, session, omit_messages=True)
 
 
 # ── interrupt / steer / redirect ─────────────────────────────────────

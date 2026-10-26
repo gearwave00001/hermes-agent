@@ -144,6 +144,31 @@ method("session.create", params=SessionCreateParams, result=SessionCreateResult,
        doc="Mint a live session (agent builds after the reply); a DB row appears on the first prompt unless seeded.")
 
 
+class SessionBranchStoredParams(ProfileParams):
+    parent_session_id: str = Field(min_length=1)
+    cols: int | None = None
+    source: str | None = None
+    cwd: str | None = None
+    # #65410: the desktop's whole-session branch rides the same create plumbing and
+    # now always sends the caller's stable key (its retry path reuses it). Optional
+    # so an older client that omits it keeps the historic behaviour.
+    idempotency_key: str | None = None
+
+
+class SessionBranchStoredResult(Result):
+    session_id: str
+    stored_session_id: str
+    message_count: int
+    messages_omitted: bool
+    info: SessionLiveInfo
+
+
+method("session.branch_stored", params=SessionBranchStoredParams, result=SessionBranchStoredResult,
+       doc="Whole-session branch of a stored parent: the owning backend reads and copies the transcript, "
+           "which never crosses the wire (a separate method so an older gateway fails loudly, not with an empty "
+           "branch).")
+
+
 # ── session.resume / activate ─────────────────────────────────────────────────────────────────
 
 
@@ -343,6 +368,9 @@ method("session.close", params=SessionCloseParams, result=SessionCloseResult,
 class SessionBranchParams(SessionParams):
     name: str | None = None
     count: int | None = None  # keep only the first N rows of the source history
+    # #65410: the desktop's mid-chat branch retry reuses the SAME key so a
+    # lost-response retry returns the SAME child instead of a duplicate.
+    idempotency_key: str | None = None
 
 
 class SessionBranchResult(Result):
@@ -357,6 +385,26 @@ class SessionBranchResult(Result):
 
 method("session.branch", params=SessionBranchParams, result=SessionBranchResult,
        doc="Fork a live session into a new stored child that shares the parent's history so far.")
+
+
+class SessionBranchWholeParams(SessionParams):
+    name: str | None = None
+    # #65410: same retry contract as session.branch.
+    idempotency_key: str | None = None
+
+
+class SessionBranchWholeResult(Result):
+    session_id: str
+    stored_session_id: str
+    title: str
+    parent: str
+    message_count: int
+    messages_omitted: bool
+    info: SessionLiveInfo
+
+
+method("session.branch_whole", params=SessionBranchWholeParams, result=SessionBranchWholeResult,
+       doc="session.branch of the whole history without echoing the copied transcript back.")
 
 
 class SessionUndoParams(SessionParams):
