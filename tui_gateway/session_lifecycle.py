@@ -621,14 +621,10 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         if should_interrupt:
             from agent.interrupt_compat import request_hard_interrupt
             request_hard_interrupt(session.get("agent"))
-        # Background delegations are detached from the turn's interrupt fan-out; a stop ends them too
-        # (own UI sid + spawner id only — a viewer tab must not kill gateway work). Each returns as an
-        # interrupted completion with its partial output.
-        with contextlib.suppress(Exception):
-            from tools.async_delegation import interrupt_for_session
-            interrupt_for_session(
-                origin_ui_session_id=_lifecycle_own_sid(session, sid), reason="user_stop",
-                parent_session_id=str(getattr(session.get("agent"), "session_id", "") or ""))
+        # A background subagent is independent of the chat that spawned it: a turn stop (Stop button,
+        # Esc, Ctrl+C, orphan-reaper interrupt) hard-cancels THIS turn only and never touches the
+        # session's detached background delegations — they keep running and report back. Only the
+        # explicit /stop command and session close/reset end them (_finalize_session below).
         if not run_thread_alive:
             with session["history_lock"]:
                 if session.get("running"):

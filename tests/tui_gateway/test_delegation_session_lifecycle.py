@@ -156,3 +156,44 @@ class TestFinalizeInterruptsOwnDelegations:
         kwargs = mock_int.call_args.kwargs
         assert kwargs["session_key"] == ""
         assert kwargs["origin_ui_session_id"] == "tab9"
+
+
+class TestTurnInterruptKeepsBackgroundDelegations:
+    """A background subagent is independent of the chat that spawned it: a turn
+    stop (Stop button, Esc, Ctrl+C, orphan-reaper interrupt) hard-cancels the
+    turn only. Session close/reset (``_finalize_session`` above) still ends them."""
+
+    def _make_running_session(self) -> dict:
+        agent = MagicMock()
+        agent.session_id = "sess_A"
+        return {
+            "history_lock": threading.Lock(),
+            "running": True,
+            "queued_prompt": None,
+            "session_key": "agent:main:tui:dm:s1",
+            "agent": agent,
+            "_run_thread": None,
+            "_sid": "tab1",
+        }
+
+    def test_turn_interrupt_never_ends_background_delegations(self):
+        from tui_gateway import server
+
+        session = self._make_running_session()
+        with patch.object(server, "_clear_pending"), \
+                patch("tools.async_delegation.interrupt_for_session") as mock_int:
+            server._interrupt_session_turn("s1", session)
+
+        mock_int.assert_not_called()
+
+    def test_turn_interrupt_still_hard_cancels_the_live_turn(self):
+        """The turn half of the contract is unchanged: the running agent still
+        receives the hard interrupt (the delegation fix must not neuter Stop)."""
+        from tui_gateway import server
+
+        session = self._make_running_session()
+        with patch.object(server, "_clear_pending"), \
+                patch("agent.interrupt_compat.request_hard_interrupt") as mock_hard:
+            server._interrupt_session_turn("s1", session)
+
+        mock_hard.assert_called_once_with(session["agent"])
