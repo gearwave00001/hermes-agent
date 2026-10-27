@@ -119,6 +119,10 @@ class SessionCreateParams(ProfileParams):
     cols: int | None = None
     source: str | None = None
     cwd: str | None = None
+    # #52589: provenance for ``cwd`` — accepted (and ignored, matching the
+    # pre-#52589 behaviour of always honouring the client cwd) so a desktop
+    # built >= c57331677d is not rejected at param admission with 4000.
+    cwd_explicit: bool | None = None
     messages: list[SeedMessage] | None = None
     parent_session_id: str | None = None
     title: str | None = None
@@ -126,10 +130,19 @@ class SessionCreateParams(ProfileParams):
     provider: str | None = None
     reasoning_effort: str | None = None
     fast: bool | None = None  # presence is the contract: omitted inherits, true pins priority, false pins normal
+    # Ultrafast tier: accepted and ignored here (``fast`` still pins priority on this backend).
+    service_tier: str | None = None
     close_on_disconnect: bool = False
     hidden: bool = False
     room_plumbing: bool = False
     follow_profile_config: bool = False
+    # #65410: stable caller-chosen key so a retried create (response lost in
+    # transit) returns the SAME session instead of a duplicate child. The
+    # handler already honours it (_create_session_locked reads the param); the
+    # desktop's branch fallback path always sends it, so the contract must
+    # admit it or validate_params answers 4000 "out of sync" before the
+    # handler runs.
+    idempotency_key: str | None = None
 
 
 class SessionCreateResult(Result):

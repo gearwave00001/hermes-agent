@@ -2761,6 +2761,7 @@ export interface SessionCreateParams {
   cols?: number | null
   source?: string | null
   cwd?: string | null
+  cwd_explicit?: boolean | null
   messages?: SeedMessage[] | null
   parent_session_id?: string | null
   title?: string | null
@@ -2768,10 +2769,12 @@ export interface SessionCreateParams {
   provider?: string | null
   reasoning_effort?: string | null
   fast?: boolean | null
+  service_tier?: string | null
   close_on_disconnect?: boolean
   hidden?: boolean
   room_plumbing?: boolean
   follow_profile_config?: boolean
+  idempotency_key?: string | null
 }
 /** One create-time transcript row (``session_history._coerce_seed_history``); ``text`` is the legacy alias of ``content``; only ``display_kind: "hidden"`` is accepted from the wire. Clients forward stored rows verbatim (``_row_id``, ``timestamp``, …) and the coercer drops what it does not use, so the row stays open. */
 export interface SeedMessage {
@@ -2815,6 +2818,21 @@ export interface ToolLabel {
 }
 /** Which surface one inner call of a bridged ``tool_call`` runs on. */
 export type ToolLabelKind = 'connector' | 'mcp' | 'tool'
+export interface SessionBranchStoredParams {
+  profile?: string | null
+  parent_session_id: string
+  cols?: number | null
+  source?: string | null
+  cwd?: string | null
+  idempotency_key?: string | null
+}
+export interface SessionBranchStoredResult {
+  session_id: string
+  stored_session_id: string
+  message_count: number
+  messages_omitted: boolean
+  info: SessionLiveInfo
+}
 /** ``session_id`` is the STORED id (or an exact title); the reply's ``session_id`` is the runtime id. */
 export interface SessionResumeParams {
   session_id: string
@@ -3057,6 +3075,7 @@ export interface SessionBranchParams {
   profile?: string | null
   name?: string | null
   count?: number | null
+  idempotency_key?: string | null
 }
 export interface SessionBranchResult {
   session_id: string
@@ -3065,6 +3084,21 @@ export interface SessionBranchResult {
   parent: string
   message_count: number
   messages: TranscriptMessage[]
+  info: SessionLiveInfo
+}
+export interface SessionBranchWholeParams {
+  session_id: string
+  profile?: string | null
+  name?: string | null
+  idempotency_key?: string | null
+}
+export interface SessionBranchWholeResult {
+  session_id: string
+  stored_session_id: string
+  title: string
+  parent: string
+  message_count: number
+  messages_omitted: boolean
   info: SessionLiveInfo
 }
 export interface SessionUndoParams {
@@ -4970,6 +5004,10 @@ export interface RpcMethods {
   'session.active_list': { params: SessionActiveListParams; result: SessionActiveListResult }
   /** Fork a live session into a new stored child that shares the parent's history so far. */
   'session.branch': { params: SessionBranchParams; result: SessionBranchResult }
+  /** Whole-session branch of a stored parent: the owning backend reads and copies the transcript, which never crosses the wire (a separate method so an older gateway fails loudly, not with an empty branch). */
+  'session.branch_stored': { params: SessionBranchStoredParams; result: SessionBranchStoredResult }
+  /** session.branch of the whole history without echoing the copied transcript back. */
+  'session.branch_whole': { params: SessionBranchWholeParams; result: SessionBranchWholeResult }
   /** Tear down a live session (its stored row stays resumable). */
   'session.close': { params: SessionCloseParams; result: SessionCloseResult }
   /** Manual /compress of an idle session, optionally focused on a topic. */
@@ -5277,6 +5315,8 @@ export const RPC_METHODS = [
   'session.activate',
   'session.active_list',
   'session.branch',
+  'session.branch_stored',
+  'session.branch_whole',
   'session.close',
   'session.compress',
   'session.context_breakdown',
